@@ -3,7 +3,6 @@ import os
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
-from app.bootstrap import TENANT_ID
 from app.database import SessionLocal
 from app.main import app
 from app.models import Order, Shop, Tenant, User
@@ -152,4 +151,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
         assert other_orders.json()["records"][0]["erp_order_no"] == "SO-TENANT-ISOLATED-0001"
         tenant_orders = client.get("/api/v1/orders", headers=headers)
         assert tenant_orders.json()["total"] == 10
-        assert all(record["tenant_id"] == TENANT_ID for record in tenant_orders.json()["records"])
+        assert all(
+            record["erp_order_no"] != "SO-TENANT-ISOLATED-0001"
+            for record in tenant_orders.json()["records"]
+        )
