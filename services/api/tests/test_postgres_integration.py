@@ -94,7 +94,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
 
         other_tenant_id = "00000000-0000-0000-0000-000000000002"
         other_user_id = "00000000-0000-0000-0000-000000000202"
-        other_shop_id = "00000000-0000-0000-0000-000000001002"
+        other_shop_id = "00000000-0000-0000-0000-000000001005"
         db.add(Tenant(id=other_tenant_id, name="隔离验证企业"))
         db.add(
             User(
