@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import Order, Shop, Tenant, User
+from app.models import InventoryReservation, Order, OrderItem, Shop, Tenant, User
 from app.security import Principal, create_token
 
 POSTGRES_URL = os.getenv("DATABASE_URL", "")
@@ -28,16 +28,70 @@ def test_postgresql_migrations_login_and_order_sync() -> None:
     client = TestClient(app)
     headers = _login(client)
 
-    synced = client.post("/api/v1/orders/mock/sync?count=25", headers=headers)
+    synced = client.post("/api/v1/orders/mock/sync?count=1000", headers=headers)
     assert synced.status_code == 200
-    assert synced.json()["created"] == 25
+    assert synced.json()["created"] == 1000
+    repeated = client.post("/api/v1/orders/mock/sync?count=1000", headers=headers)
+    assert repeated.status_code == 200
+    assert repeated.json()["created"] == 0
 
     dashboard = client.get("/api/v1/dashboard/summary", headers=headers)
     assert dashboard.status_code == 200
-    assert dashboard.json()["orders_total"] == 25
+    assert dashboard.json()["orders_total"] == 1000
 
     with SessionLocal() as db:
-        assert db.query(Order).count() == 25
+        assert db.query(Order).count() == 1000
+
+
+def test_postgresql_multi_shop_shared_internal_sku() -> None:
+    client = TestClient(app)
+    headers = _login(client)
+    synced = client.post("/api/v1/orders/mock/sync?count=10", headers=headers)
+    assert synced.status_code == 200
+
+    products = client.get("/api/v1/products", headers=headers).json()
+    shared_sku = next(
+        sku for product in products for sku in product["skus"] if sku["sku_code"] == "SO-CUP-450"
+    )
+    records = client.get("/api/v1/orders?page_size=20", headers=headers).json()["records"]
+    selected: list[dict] = []
+    for record in records:
+        if record["audit_status"] == "PENDING" and record["print_blockers"] == [
+            "订单尚未审核"
+        ] and all(item["shop_id"] != record["shop_id"] for item in selected):
+            selected.append(record)
+        if len(selected) == 2:
+            break
+    assert len(selected) == 2
+
+    for record in selected:
+        with SessionLocal() as db:
+            item = db.query(OrderItem).filter(OrderItem.order_id == record["id"]).one()
+            platform_sku = item.platform_sku
+            item.internal_sku = None
+            db.commit()
+        mapping = client.post(
+            "/api/v1/products/skus/mappings",
+            headers=headers,
+            json={
+                "sku_id": shared_sku["id"],
+                "shop_id": record["shop_id"],
+                "platform_sku": platform_sku,
+            },
+        )
+        assert mapping.status_code == 200
+
+    audited = client.post(
+        "/api/v1/orders/batch/audit",
+        headers=headers,
+        json={"order_ids": [record["id"] for record in selected]},
+    )
+    assert audited.status_code == 200
+    assert audited.json()["updated"] == 2
+    with SessionLocal() as db:
+        reservations = db.query(InventoryReservation).all()
+        assert len(reservations) == 2
+        assert {reservation.sku_id for reservation in reservations} == {shared_sku["id"]}
 
 
 def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation() -> None:
