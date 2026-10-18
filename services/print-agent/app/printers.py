@@ -32,6 +32,10 @@ JOB_STATUS_MAP = {
 }
 
 
+class PrintSubmissionUnknownError(RuntimeError):
+    """Raised when a spooler may have accepted a job before the call failed."""
+
+
 def _windows_records() -> list[dict[str, Any]]:
     if platform.system() != "Windows":
         return []
@@ -258,6 +262,10 @@ def _submit_with_gdi(
                 device_context.EndDoc()
             except Exception:
                 pass
+        if document_started:
+            raise PrintSubmissionUnknownError(
+                f"Windows Spooler 可能已接收作业，但提交结果未知：{exc}"
+            ) from exc
         raise RuntimeError(f"Windows 打印失败：{exc}") from exc
     finally:
         if device_context is not None:

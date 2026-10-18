@@ -74,14 +74,16 @@ class PrintStore:
         with self.connect() as db:
             rows = db.execute(
                 """SELECT id, status, system_job_id FROM print_jobs
-                WHERE status IN ('CREATED', 'QUEUED', 'RENDERED', 'SUBMITTED', 'UNKNOWN')"""
+                WHERE status IN (
+                    'CREATED', 'QUEUED', 'RENDERED', 'SUBMITTING', 'SUBMITTED', 'UNKNOWN'
+                )"""
             ).fetchall()
             for row in rows:
                 status = row["status"]
                 if status == "UNKNOWN":
                     new_status = "UNKNOWN"
                     message = retained_message
-                elif row["system_job_id"] or status == "SUBMITTED":
+                elif status == "SUBMITTING" or row["system_job_id"] or status == "SUBMITTED":
                     new_status = "UNKNOWN"
                     message = submitted_message
                 else:

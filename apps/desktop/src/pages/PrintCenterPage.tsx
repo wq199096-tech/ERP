@@ -12,8 +12,8 @@ const TYPES = [
   { value: 'MANIFEST_A4', label: '发货清单', description: 'A4 / A5 / 80 mm 可切换', color: '#12b76a' },
   { value: 'PRODUCT_LABEL', label: '商品标签', description: '60 × 40 mm，含条形码', color: '#f79009' },
 ];
-const statusColors: Record<string, string> = { ACKNOWLEDGED: 'processing', FAILED: 'error', UNKNOWN: 'warning', CANCELLED: 'default', PRINTED: 'success', RENDERED: 'default', SUBMITTED: 'blue' };
-const statusLabels: Record<string, string> = { ACKNOWLEDGED: '打印机已接收', FAILED: '失败', UNKNOWN: '状态未知', CANCELLED: '已取消', PRINTED: '已确认出纸', RENDERED: 'PDF 已生成', SUBMITTED: 'Spooler 已接收' };
+const statusColors: Record<string, string> = { ACKNOWLEDGED: 'processing', FAILED: 'error', UNKNOWN: 'warning', CANCELLED: 'default', PRINTED: 'success', RENDERED: 'default', SUBMITTED: 'blue', SUBMITTING: 'processing' };
+const statusLabels: Record<string, string> = { ACKNOWLEDGED: '打印机已接收', FAILED: '失败', UNKNOWN: '状态未知', CANCELLED: '已取消', PRINTED: '已确认出纸', RENDERED: 'PDF 已生成', SUBMITTED: 'Spooler 已接收', SUBMITTING: '正在提交' };
 
 export function PrintCenterPage() {
   const session = useAppStore((state) => state.session)!;

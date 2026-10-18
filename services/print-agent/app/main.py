@@ -1,4 +1,5 @@
 import secrets
+import threading
 import uuid
 from typing import Literal
 
@@ -8,7 +9,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .config import get_settings
 from .contracts import PrintPayload
-from .printers import get_spooler_job_status, list_printers, submit_pdf
+from .printers import (
+    PrintSubmissionUnknownError,
+    get_spooler_job_status,
+    list_printers,
+    submit_pdf,
+)
 from .renderer import render_pdf
 from .schemas import LabelTemplate
 from .store import FINAL_STATES, RETRYABLE_STATES, PrintStore
@@ -18,6 +24,7 @@ settings.output_path.mkdir(parents=True, exist_ok=True)
 store = PrintStore(settings.database_path)
 recovered_jobs = store.recover_interrupted()
 app = FastAPI(title="智单 ERP Print Agent", version="0.1.0")
+_execution_lock = threading.Lock()
 
 JobType = Literal["WAYBILL", "MANIFEST_A4", "MANIFEST_A5", "MANIFEST_80", "PRODUCT_LABEL"]
 
@@ -70,6 +77,7 @@ def reconcile_unknown_jobs() -> int:
 
 
 reconciled_jobs = reconcile_unknown_jobs()
+_TERMINAL_MOCK_STATES = FINAL_STATES | {"ACKNOWLEDGED"}
 
 
 @app.get("/api/v1/health", dependencies=[Depends(authorize)])
@@ -95,38 +103,52 @@ def jobs(limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
 
 
 def _execute(job: dict, simulate_result: str) -> dict:
-    if job["status"] in FINAL_STATES:
-        return job
-    store.transition(job["id"], "QUEUED")
-    output = settings.output_path / f"{job['id']}.pdf"
-    payload = job["payload"] | ({"waybill_no": job["waybill_no"]} if job["waybill_no"] else {})
-    try:
-        render_pdf(job["job_type"], payload, output)
-    except Exception as exc:
-        return store.transition(job["id"], "FAILED", f"PDF 渲染失败：{exc}")
-    store.transition(job["id"], "RENDERED", "PDF 已渲染完成", output_file=str(output))
-    if not job["printer_name"].startswith("MockPrinter"):
+    with _execution_lock:
+        current = store.get(job["id"])
+        if current is None or current["status"] in _TERMINAL_MOCK_STATES:
+            return job if current is None else current
+        job = current
+        store.transition(job["id"], "QUEUED")
+        output = settings.output_path / f"{job['id']}.pdf"
+        payload = job["payload"] | (
+            {"waybill_no": job["waybill_no"]} if job["waybill_no"] else {}
+        )
         try:
-            spooler_job_id = submit_pdf(job["printer_name"], output, job["id"])
+            render_pdf(job["job_type"], payload, output)
+        except Exception as exc:
+            output.unlink(missing_ok=True)
+            return store.transition(job["id"], "FAILED", f"PDF 渲染失败：{exc}")
+        store.transition(job["id"], "RENDERED", "PDF 已渲染完成", output_file=str(output))
+        if not job["printer_name"].startswith("MockPrinter"):
+            # Persist the uncertainty window before handing the PDF to Windows.  If this
+            # process dies after StartDoc but before returning a job id, restart will
+            # classify SUBMITTING as UNKNOWN instead of safely retrying it as FAILED.
+            store.transition(job["id"], "SUBMITTING", "正在提交到 Windows Spooler")
+            try:
+                spooler_job_id = submit_pdf(job["printer_name"], output, job["id"])
+            except PrintSubmissionUnknownError as exc:
+                return store.transition(job["id"], "UNKNOWN", str(exc))
+            except RuntimeError as exc:
+                return store.transition(job["id"], "FAILED", str(exc))
+            except Exception as exc:
+                return store.transition(
+                    job["id"], "UNKNOWN", f"Windows 提交结果未知，等待人工核验：{exc}"
+                )
             return store.transition(
                 job["id"],
                 "SUBMITTED",
                 "Windows Spooler 已接收；实际出纸状态需人工或设备回执确认",
                 system_job_id=spooler_job_id,
             )
-        except RuntimeError as exc:
-            return store.transition(job["id"], "FAILED", str(exc))
-        except Exception as exc:
-            return store.transition(job["id"], "FAILED", f"Windows 打印失败：{exc}")
-    if simulate_result == "failure":
-        return store.transition(job["id"], "FAILED", "MockPrinter 模拟离线")
-    if simulate_result == "unknown":
-        return store.transition(job["id"], "UNKNOWN", "系统队列未返回纸张输出确认")
-    return store.transition(
-        job["id"],
-        "ACKNOWLEDGED",
-        "MockPrinter 已接收；不等同于真实纸张已输出",
-    )
+        if simulate_result == "failure":
+            return store.transition(job["id"], "FAILED", "MockPrinter 模拟离线")
+        if simulate_result == "unknown":
+            return store.transition(job["id"], "UNKNOWN", "系统队列未返回纸张输出确认")
+        return store.transition(
+            job["id"],
+            "ACKNOWLEDGED",
+            "MockPrinter 已接收；不等同于真实纸张已输出",
+        )
 
 
 def _spooler_status_for_job(job: dict) -> dict[str, str]:

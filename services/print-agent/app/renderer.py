@@ -133,22 +133,23 @@ def _render_waybill(canvas: Canvas, width: float, height: float, payload: dict) 
     if payload.get("remark"):
         lines.append(f"备注：{payload['remark']}")
     lines.append("说明：测试样张，无真实物流效力。")
-    layout: list[tuple[str, float]] = []
+    layout: list[tuple[str, float]] | None = None
     for font_size, line_height in ((10, 7), (9, 6.3), (8, 5.6), (7, 5.0), (6, 4.4)):
-        layout = []
+        candidate: list[tuple[str, float]] = []
         y = height - 25 * mm
         for line in lines:
             for text in _wrapped_text(line, FONT, font_size, width - 12 * mm):
-                layout.append((text, y))
+                candidate.append((text, y))
                 y -= line_height
             y -= 1.5
         if y >= 38 * mm:
+            layout = candidate
             canvas.setFont(FONT, font_size)
             for text, text_y in layout:
                 canvas.drawString(6 * mm, text_y, text)
             break
-    if not layout:
-        raise ValueError("电子面单内容超出纸张边界")
+    if layout is None:
+        raise ValueError("电子面单内容超出纸张边界，请减少商品或拆分包裹")
     barcode = code128.Code128(payload.get("waybill_no", "TEST0000000001"), barHeight=20 * mm)
     barcode.drawOn(canvas, 8 * mm, 18 * mm)
 

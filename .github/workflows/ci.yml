@@ -1,4 +1,4 @@
-name: Stage 3.3 CI
+name: Stage 3.4 CI
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: erp_stage33_test
+          POSTGRES_DB: erp_stage34_test
         ports:
           - 5432:5432
         options: >-
@@ -39,7 +39,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/erp_stage33_test
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/erp_stage34_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -64,7 +64,7 @@ jobs:
       - run: pnpm test
       - run: pnpm exec playwright install chromium
         working-directory: apps/desktop
-      - run: pnpm --filter @smartorder/desktop test:e2e
+      - run: pnpm --filter @smartorder/desktop exec playwright test e2e/browser.spec.ts e2e/electron.spec.ts
       - run: pnpm package:win
       - run: pnpm --filter @smartorder/desktop exec playwright test e2e/packaged.spec.ts
         env:

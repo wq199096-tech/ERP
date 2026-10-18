@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ from pypdf import PdfReader
 from pypdfium2 import PdfDocument
 
 from app import printers as printer_driver
-from app.main import app, settings, store
+from app.main import _execute, app, settings, store
 from app.store import PrintStore
 
 client = TestClient(app)
@@ -450,6 +451,61 @@ def test_waybill_renders_long_text_special_characters_and_quantity() -> None:
     assert "999999" in text
 
 
+@pytest.mark.parametrize("item_count", [1, 10, 30])
+def test_waybill_renders_every_item_without_silent_loss(item_count: int) -> None:
+    items = [
+        {
+            "internal_sku": f"SKU-ITEM-{index:03d}",
+            "product_name": f"多商品名称验证-{index:03d}",
+            "specification": "规格-A",
+            "quantity": 1 + index,
+            "barcode": "6970000010011",
+            "copies": 1,
+        }
+        for index in range(item_count)
+    ]
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": f"waybill-items-{item_count:03d}",
+            "job_type": "WAYBILL",
+            "payload": print_payload(f"SO-ITEMS-{item_count:03d}", items=items),
+        },
+    ).json()
+    assert job["status"] == "ACKNOWLEDGED", job["error_message"]
+    text = PdfReader(job["output_file"]).pages[0].extract_text()
+    assert f"SO-ITEMS-{item_count:03d}" in text
+    for index in range(item_count):
+        assert f"SKU-ITEM-{index:03d}" in text
+
+
+def test_waybill_overflow_fails_and_does_not_publish_partial_pdf() -> None:
+    items = [
+        {
+            "internal_sku": f"SKU-OVERFLOW-{index:03d}",
+            "product_name": f"超出面单可用空间的商品-{index:03d}",
+            "specification": "规格-A",
+            "quantity": 1,
+            "barcode": "6970000010011",
+            "copies": 1,
+        }
+        for index in range(100)
+    ]
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "waybill-overflow-001",
+            "job_type": "WAYBILL",
+            "payload": print_payload("SO-OVERFLOW-001", items=items),
+        },
+    ).json()
+    assert job["status"] == "FAILED"
+    assert "内容超出纸张边界" in job["error_message"]
+    assert job["output_file"] is None
+
+
 def test_manifest_pages_instead_of_dropping_items() -> None:
     items = [
         {
@@ -708,9 +764,13 @@ def test_1000_job_crash_recovery_distinguishes_submitted_and_unsubmitted(tmp_pat
             waybill_no=f"TEST-{index:04d}-WAYBILL",
         )
         first_store.transition(job["id"], "RENDERED" if index % 2 else "QUEUED")
-        if index % 2:
+        if index % 4 == 2:
             first_store.transition(
                 job["id"], "SUBMITTED", "Mock Spooler 已接收", system_job_id=str(index + 1000)
+            )
+        elif index % 4 == 3:
+            first_store.transition(
+                job["id"], "SUBMITTING", "Spooler 已接收，但 Job ID 崩溃前尚未入库"
             )
     recovered = PrintStore(path)
     assert recovered.recover_interrupted() == 1000
@@ -722,3 +782,61 @@ def test_1000_job_crash_recovery_distinguishes_submitted_and_unsubmitted(tmp_pat
     assert len(waybills) == len(set(waybills)) == 1000
     assert all("尚未提交" in job["error_message"] for job in failed)
     assert all("可能已提交" in job["error_message"] for job in unknown)
+
+
+def test_spooler_accepted_but_id_not_persisted_becomes_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def accept_then_crash(*_args, **_kwargs) -> str:
+        raise OSError("模拟 Spooler 接收后进程崩溃")
+
+    monkeypatch.setattr("app.main.submit_pdf", accept_then_crash)
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "crash-before-job-id-001",
+            "job_type": "WAYBILL",
+            "printer_name": "Mock Hardware",
+            "payload": print_payload("SO-CRASH-ID-001"),
+        },
+    ).json()
+    assert job["status"] == "UNKNOWN"
+    assert job["system_job_id"] is None
+    assert job["waybill_no"]
+
+    restarted_store = PrintStore(settings.database_path)
+    assert restarted_store.recover_interrupted() == 0
+    recovered = restarted_store.get(job["id"])
+    assert recovered["status"] == "UNKNOWN"
+    assert recovered["waybill_no"] == job["waybill_no"]
+
+
+def test_concurrent_unknown_retries_do_not_submit_twice() -> None:
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "concurrent-unknown-001",
+            "job_type": "WAYBILL",
+            "simulate_result": "unknown",
+            "payload": print_payload("SO-CONCURRENT-001"),
+        },
+    ).json()
+
+    def retry(_: int) -> dict:
+        return _execute(job, "success")
+
+    queued_before = len(
+        [item for item in store.list_attempts(job["id"]) if item["status"] == "QUEUED"]
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(retry, range(4)))
+    assert [result["status"] for result in results] == ["ACKNOWLEDGED"] * 4
+    assert len(store.list(1000)) == 1
+    attempts = store.list_attempts(job["id"])
+    queued_attempts_after_retry = [
+        attempt for attempt in attempts if attempt["status"] == "QUEUED"
+    ]
+    assert len(queued_attempts_after_retry) == queued_before + 1
