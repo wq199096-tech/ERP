@@ -33,7 +33,7 @@ os.environ["ENABLE_DEMO_DATA"] = "true"
 from app import models  # noqa: E402,F401
 from app.database import Base, engine  # noqa: E402
 
-collect_ignore_glob = [] if IS_POSTGRES else ["test_postgres_integration.py"]
+collect_ignore_glob = [] if IS_POSTGRES else ["test_postgres_*.py"]
 
 
 def _alembic_config() -> Config:

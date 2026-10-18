@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Checkbox, Form, Input, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { App as AntdApp, Button, Card, Checkbox, Form, Input, Select, Space, Table, Tag, Typography } from 'antd';
 import { useState } from 'react';
 import { api } from '../api';
 import { useAppStore } from '../store';
@@ -7,10 +7,14 @@ import type { InventoryBalance } from '../types';
 
 export function InventoryPage() {
   const session = useAppStore((state) => state.session)!;
+  const { message } = AntdApp.useApp();
   const queryClient = useQueryClient();
   const [warehouseId, setWarehouseId] = useState<string>();
   const [keyword, setKeyword] = useState('');
   const [lowStock, setLowStock] = useState(false);
+  const [inboundForm] = Form.useForm();
+  const [transferForm] = Form.useForm();
+  const [stocktakeForm] = Form.useForm();
   const warehouses = useQuery({ queryKey: ['warehouses'], queryFn: () => api.warehouses(session.token) });
   const inventory = useQuery({
     queryKey: ['inventory', warehouseId, keyword, lowStock],
@@ -39,19 +43,33 @@ export function InventoryPage() {
   };
   const inbound = useMutation({
     mutationFn: (body: object) => api.inventoryInbound(session.token, body),
-    onSuccess: (result) => { message.success(`入库完成，当前在库 ${result.on_hand}`); invalidate(); },
+    onSuccess: (result) => {
+      message.success(`入库完成，当前在库 ${result.on_hand}`, 10);
+      inboundForm.resetFields(['quantity', 'note']);
+      invalidate();
+    },
     onError: (error: Error) => message.error(error.message),
   });
   const transfer = useMutation({
     mutationFn: (body: object) => api.inventoryTransfer(session.token, body),
-    onSuccess: (result) => { message.success(`调拨完成：源 ${result.source_on_hand}，目标 ${result.target_on_hand}`); invalidate(); },
+    onSuccess: (result) => {
+      message.success(`调拨完成：源 ${result.source_on_hand}，目标 ${result.target_on_hand}`, 10);
+      transferForm.resetFields(['quantity', 'note']);
+      invalidate();
+    },
     onError: (error: Error) => message.error(error.message),
   });
   const stocktake = useMutation({
     mutationFn: (body: object) => api.inventoryStocktake(session.token, body),
-    onSuccess: (result) => { message.success(`盘点完成，当前在库 ${result.on_hand}`); invalidate(); },
+    onSuccess: (result) => {
+      message.success(`盘点完成，当前在库 ${result.on_hand}`, 10);
+      stocktakeForm.resetFields(['counted_quantity', 'note']);
+      invalidate();
+    },
     onError: (error: Error) => message.error(error.message),
   });
+
+  const positiveInteger = { pattern: /^\d+$/, message: '数量必须是正整数' };
 
   const skuOptions = allSkus.map((item) => ({ value: item.id, label: `${item.sku_code} · ${item.product_name}` }));
   const warehouseOptions = warehouses.data?.map((item) => ({ value: item.id, label: `${item.code} · ${item.name}` })) ?? [];
@@ -79,32 +97,40 @@ export function InventoryPage() {
       </Card>
       <Card title="库存操作">
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
-          <Form layout="vertical" onFinish={(values) => inbound.mutate(values)} initialValues={{ low_stock_threshold: 0 }}>
+          <Form form={inboundForm} layout="vertical" data-testid="inventory-inbound-form" onFinish={(values) => inbound.mutate(values)} initialValues={{ low_stock_threshold: 0 }}>
             <Space wrap align="start">
-              <Form.Item name="warehouse_id" label="仓库" rules={[{ required: true }]}><Select style={{ width: 220 }} options={warehouseOptions} /></Form.Item>
-              <Form.Item name="sku_id" label="SKU" rules={[{ required: true }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
-              <Form.Item name="quantity" label="入库数量" rules={[{ required: true }]}><Input type="number" min="1" style={{ width: 120 }} /></Form.Item>
-              <Form.Item name="low_stock_threshold" label="预警阈值"><Input type="number" min="0" style={{ width: 120 }} /></Form.Item>
-              <Form.Item name="note" label="备注"><Input style={{ width: 240 }} /></Form.Item>
-              <Form.Item><Button type="primary" loading={inbound.isPending}>入库</Button></Form.Item>
+              <Form.Item name="warehouse_id" label="仓库" rules={[{ required: true, message: '请选择仓库' }]}><Select style={{ width: 220 }} options={warehouseOptions} /></Form.Item>
+              <Form.Item name="sku_id" label="SKU" rules={[{ required: true, message: '请选择 SKU' }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
+              <Form.Item name="quantity" label="入库数量" rules={[{ required: true, message: '请输入入库数量' }, positiveInteger]}><Input type="number" min="1" style={{ width: 120 }} /></Form.Item>
+              <Form.Item name="low_stock_threshold" label="预警阈值" rules={[{ pattern: /^\d+$/, message: '预警阈值必须是不小于 0 的整数' }]}><Input type="number" min="0" style={{ width: 120 }} /></Form.Item>
+              <Form.Item name="note" label="备注" rules={[{ max: 500, message: '备注不能超过 500 个字符' }]}><Input style={{ width: 240 }} maxLength={500} /></Form.Item>
+              <Form.Item><Button type="primary" htmlType="submit" loading={inbound.isPending}>入库</Button></Form.Item>
             </Space>
           </Form>
-          <Form layout="vertical" onFinish={(values) => transfer.mutate(values)}>
+          <Form form={transferForm} layout="vertical" data-testid="inventory-transfer-form" onFinish={(values) => transfer.mutate(values)}>
             <Space wrap align="start">
-              <Form.Item name="source_warehouse_id" label="源仓库" rules={[{ required: true }]}><Select style={{ width: 200 }} options={warehouseOptions} /></Form.Item>
-              <Form.Item name="target_warehouse_id" label="目标仓库" rules={[{ required: true }]}><Select style={{ width: 200 }} options={warehouseOptions} /></Form.Item>
-              <Form.Item name="sku_id" label="SKU" rules={[{ required: true }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
-              <Form.Item name="quantity" label="数量" rules={[{ required: true }]}><Input type="number" min="1" style={{ width: 120 }} /></Form.Item>
-              <Form.Item><Button loading={transfer.isPending}>调拨</Button></Form.Item>
+              <Form.Item name="source_warehouse_id" label="源仓库" rules={[{ required: true, message: '请选择源仓库' }]}><Select style={{ width: 200 }} options={warehouseOptions} /></Form.Item>
+              <Form.Item name="target_warehouse_id" label="目标仓库" dependencies={['source_warehouse_id']} rules={[
+                { required: true, message: '请选择目标仓库' },
+                ({ getFieldValue }) => ({
+                  validator: (_, value) => value && value === getFieldValue('source_warehouse_id')
+                    ? Promise.reject(new Error('目标仓库不能与源仓库相同'))
+                    : Promise.resolve(),
+                }),
+              ]}><Select style={{ width: 200 }} options={warehouseOptions} /></Form.Item>
+              <Form.Item name="sku_id" label="SKU" rules={[{ required: true, message: '请选择 SKU' }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
+              <Form.Item name="quantity" label="数量" rules={[{ required: true, message: '请输入调拨数量' }, positiveInteger]}><Input type="number" min="1" style={{ width: 120 }} /></Form.Item>
+              <Form.Item name="note" label="备注" rules={[{ max: 500, message: '备注不能超过 500 个字符' }]}><Input style={{ width: 240 }} maxLength={500} /></Form.Item>
+              <Form.Item><Button htmlType="submit" loading={transfer.isPending}>调拨</Button></Form.Item>
             </Space>
           </Form>
-          <Form layout="vertical" onFinish={(values) => stocktake.mutate(values)}>
+          <Form form={stocktakeForm} layout="vertical" data-testid="inventory-stocktake-form" onFinish={(values) => stocktake.mutate(values)}>
             <Space wrap align="start">
-              <Form.Item name="warehouse_id" label="仓库" rules={[{ required: true }]}><Select style={{ width: 220 }} options={warehouseOptions} /></Form.Item>
-              <Form.Item name="sku_id" label="SKU" rules={[{ required: true }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
-              <Form.Item name="counted_quantity" label="实盘数量" rules={[{ required: true }]}><Input type="number" min="0" style={{ width: 120 }} /></Form.Item>
-              <Form.Item name="note" label="备注"><Input style={{ width: 240 }} /></Form.Item>
-              <Form.Item><Button loading={stocktake.isPending}>盘点调整</Button></Form.Item>
+              <Form.Item name="warehouse_id" label="仓库" rules={[{ required: true, message: '请选择仓库' }]}><Select style={{ width: 220 }} options={warehouseOptions} /></Form.Item>
+              <Form.Item name="sku_id" label="SKU" rules={[{ required: true, message: '请选择 SKU' }]}><Select style={{ width: 260 }} options={skuOptions} /></Form.Item>
+              <Form.Item name="counted_quantity" label="实盘数量" rules={[{ required: true, message: '请输入实盘数量' }, { pattern: /^\d+$/, message: '实盘数量必须是不小于 0 的整数' }]}><Input type="number" min="0" style={{ width: 120 }} /></Form.Item>
+              <Form.Item name="note" label="备注" rules={[{ max: 500, message: '备注不能超过 500 个字符' }]}><Input style={{ width: 240 }} maxLength={500} /></Form.Item>
+              <Form.Item><Button htmlType="submit" loading={stocktake.isPending}>盘点调整</Button></Form.Item>
             </Space>
           </Form>
         </Space>

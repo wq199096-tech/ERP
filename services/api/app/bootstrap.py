@@ -73,18 +73,25 @@ def ensure_development_inventory(db: Session) -> None:
     if settings.is_production or not settings.enable_demo_data:
         return
     if not db.get(Warehouse, WAREHOUSE[0]):
-        if not db.scalar(select(Warehouse).where(Warehouse.tenant_id == TENANT_ID)):
-            db.add(
-                Warehouse(
-                    id=WAREHOUSE[0],
-                    tenant_id=TENANT_ID,
-                    code=WAREHOUSE[1],
-                    name=WAREHOUSE[2],
-                    address="浙江省杭州市演示地址***",
-                    is_default=True,
-                )
+        # 演示仓库按固定 ID 兜底创建。旧逻辑只在“租户一个仓库都没有”时才创建，
+        # 用户（或测试）先建仓库后，演示 SKU / 库存余额就会缺失，订单同步会
+        # 引用不存在的演示仓库，导致审核阶段静默缺货。这里改为幂等补齐。
+        has_default = db.scalar(
+            select(Warehouse.id).where(
+                Warehouse.tenant_id == TENANT_ID, Warehouse.is_default.is_(True)
             )
-            db.flush()
+        )
+        db.add(
+            Warehouse(
+                id=WAREHOUSE[0],
+                tenant_id=TENANT_ID,
+                code=WAREHOUSE[1],
+                name=WAREHOUSE[2],
+                address="浙江省杭州市演示地址***",
+                is_default=has_default is None,
+            )
+        )
+        db.flush()
     category = db.scalar(select(ProductCategory).where(ProductCategory.tenant_id == TENANT_ID))
     if not category:
         category = ProductCategory(tenant_id=TENANT_ID, name="演示商品")

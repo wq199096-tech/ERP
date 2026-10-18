@@ -45,7 +45,8 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12', cache: pip }
       - run: pip install -r services/api/requirements-dev.txt
-      - run: python -m pytest -q services/api/tests/test_postgres_integration.py
+      # 显式列出真实 PostgreSQL 集成测试文件；未收集到任何用例时 pytest 退出码非 0，直接失败。
+      - run: python -m pytest -q services/api/tests/test_postgres_integration.py services/api/tests/test_postgres_stage4_upgrade.py
 
   desktop-and-windows-build:
     runs-on: windows-latest
@@ -55,8 +56,9 @@ jobs:
         with: { python-version: '3.12', cache: pip }
       - uses: pnpm/action-setup@v4
         with: { version: 11.25.0 }
+      # electron-forms E2E 直接读取 SQLite 断言数据库落库结果，需要 node:sqlite（Node >= 23.4 无标志可用）。
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: pnpm }
+        with: { node-version: '24', cache: pnpm }
       - run: pip install -r services/api/requirements-dev.txt -r services/print-agent/requirements-dev.txt
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
@@ -64,7 +66,7 @@ jobs:
       - run: pnpm test
       - run: pnpm exec playwright install chromium
         working-directory: apps/desktop
-      - run: pnpm --filter @smartorder/desktop exec playwright test e2e/browser.spec.ts e2e/electron.spec.ts
+      - run: pnpm --filter @smartorder/desktop exec playwright test e2e/browser.spec.ts e2e/electron.spec.ts e2e/electron-forms.spec.ts
       - run: pnpm package:win
       - run: pnpm --filter @smartorder/desktop exec playwright test e2e/packaged.spec.ts
         env:

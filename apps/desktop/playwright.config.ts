@@ -5,7 +5,12 @@ import { fileURLToPath } from 'node:url';
 const desktopRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(desktopRoot, '../..');
 const python = process.env.SMARTORDER_TEST_PYTHON ?? 'python';
-const runId = process.pid;
+// 运行器（runner）与 worker 是两个进程，各自会重新求值本配置。
+// 只有运行器设置的路径允许生效，worker 必须复用同一份数据库，否则 E2E 断言会读到空库。
+const inheritedApiDatabase = process.env.SMARTORDER_E2E_API_DB;
+const apiDatabase = inheritedApiDatabase ?? path.join(repoRoot, 'services/api', `e2e-api-${process.pid}.sqlite3`);
+const runId = path.basename(apiDatabase).replace(/^e2e-api-/, '').replace(/\.sqlite3$/, '');
+process.env.SMARTORDER_E2E_API_DB = apiDatabase;
 
 export default defineConfig({
   testDir: './e2e',
@@ -18,7 +23,7 @@ export default defineConfig({
       command: `"${python}" -m uvicorn app.main:app --host 127.0.0.1 --port 8000`,
       cwd: path.join(repoRoot, 'services/api'),
       url: 'http://127.0.0.1:8000/api/v1/health',
-      env: { DATABASE_URL: `sqlite:///./e2e-api-${runId}.sqlite3`, APP_ENV: 'development', ENABLE_DEMO_DATA: 'true' },
+      env: { DATABASE_URL: `sqlite:///${apiDatabase.split(path.sep).join('/')}`, APP_ENV: 'development', ENABLE_DEMO_DATA: 'true' },
       reuseExistingServer: true,
       timeout: 60_000,
     },

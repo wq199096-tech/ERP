@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
@@ -6,7 +7,16 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import InventoryReservation, Order, OrderItem, Shop, Tenant, User
+from app.models import (
+    InventoryBalance,
+    InventoryReservation,
+    Order,
+    OrderItem,
+    Shop,
+    StockMovement,
+    Tenant,
+    User,
+)
 from app.security import Principal, create_token
 
 POSTGRES_URL = os.getenv("DATABASE_URL", "")
@@ -309,3 +319,199 @@ def test_postgresql_concurrent_reservation_scan_and_outbound() -> None:
     assert client.post(
         f"/api/v1/shipments/{shipment['id']}/ship", headers=headers
     ).status_code == 409
+
+
+def test_postgresql_inventory_fulfillment_flow_and_movement_consistency() -> None:
+    client = TestClient(app)
+    headers = _login(client)
+    synced = client.post("/api/v1/orders/mock/sync?count=10", headers=headers)
+    assert synced.status_code == 200
+
+    product = client.post(
+        "/api/v1/products", headers=headers, json={"name": "PG 一致性商品"}
+    )
+    assert product.status_code == 200
+    product_id = product.json()["id"]
+    sku = client.post(
+        "/api/v1/products/skus",
+        headers=headers,
+        json={
+            "product_id": product_id,
+            "sku_code": "PG-FLOW-SKU-001",
+            "barcode": "6970000050001",
+            "specification": "PG 一致性规格",
+            "purchase_price": "10.00",
+            "sale_price": "25.00",
+        },
+    )
+    assert sku.status_code == 200
+    sku_id = sku.json()["id"]
+
+    warehouses = client.get("/api/v1/warehouses", headers=headers).json()
+    source = warehouses[0]
+    target = client.post(
+        "/api/v1/warehouses",
+        headers=headers,
+        json={"code": "WH-PG-FLOW-02", "name": "PG 一致性目标仓", "is_default": False},
+    )
+    assert target.status_code == 200
+    target_id = target.json()["id"]
+
+    inbound = client.post(
+        "/api/v1/inventory/inbound",
+        headers=headers,
+        json={
+            "warehouse_id": source["id"],
+            "sku_id": sku_id,
+            "quantity": 100,
+            "note": "PG-FLOW-IN",
+        },
+    )
+    assert inbound.status_code == 200
+    transfer = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers,
+        json={
+            "source_warehouse_id": source["id"],
+            "target_warehouse_id": target_id,
+            "sku_id": sku_id,
+            "quantity": 10,
+            "note": "PG-FLOW-TRANSFER",
+        },
+    )
+    assert transfer.status_code == 200
+    stocktake = client.post(
+        "/api/v1/inventory/stocktake",
+        headers=headers,
+        json={
+            "warehouse_id": source["id"],
+            "sku_id": sku_id,
+            "counted_quantity": 95,
+            "note": "PG-FLOW-STOCKTAKE",
+        },
+    )
+    assert stocktake.status_code == 200
+
+    with SessionLocal() as db:
+        candidates = (
+            db.query(Order)
+            .filter(Order.audit_status == "PENDING", Order.status == "PENDING_SHIPMENT")
+            .order_by(Order.created_at.asc())
+            .limit(3)
+            .all()
+        )
+        assert len(candidates) == 3
+        for order, quantity in zip(candidates, (5, 4, 10000), strict=True):
+            order.items[0].internal_sku = "PG-FLOW-SKU-001"
+            order.items[0].barcode = "6970000050001"
+            order.items[0].quantity = quantity
+        db.commit()
+        order_ids = [order.id for order in candidates]
+
+    audited = client.post(
+        "/api/v1/orders/batch/audit", headers=headers, json={"order_ids": order_ids}
+    )
+    assert audited.status_code == 200
+    assert audited.json()["updated"] == 2
+    cancel_order_id, outbound_order_id, shortage_order_id = order_ids
+    assert any(
+        "库存不足" in reason
+        for reasons in audited.json()["blocked"].values()
+        for reason in reasons
+    )
+    assert shortage_order_id in audited.json()["blocked"]
+
+    with SessionLocal() as db:
+        source_balance = db.query(InventoryBalance).filter_by(
+            warehouse_id=source["id"], sku_id=sku_id
+        ).one()
+        assert (source_balance.on_hand, source_balance.reserved) == (95, 9)
+
+    cancelled = client.post(f"/api/v1/orders/{cancel_order_id}/cancel", headers=headers)
+    assert cancelled.status_code == 200
+    assert cancelled.json()["released"] is True
+    with SessionLocal() as db:
+        source_balance = db.query(InventoryBalance).filter_by(
+            warehouse_id=source["id"], sku_id=sku_id
+        ).one()
+        assert (source_balance.on_hand, source_balance.reserved) == (95, 4)
+
+    shipment_response = client.post(
+        f"/api/v1/shipments/prepare?order_id={outbound_order_id}", headers=headers
+    )
+    assert shipment_response.status_code == 200
+    shipment = shipment_response.json()
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/scan",
+        headers=headers,
+        json={"scan_type": "ORDER", "barcode": shipment["erp_order_no"]},
+    ).status_code == 200
+    for _ in range(4):
+        assert client.post(
+            f"/api/v1/shipments/{shipment['id']}/scan",
+            headers=headers,
+            json={"scan_type": "SKU", "barcode": "6970000050001"},
+        ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/verify", headers=headers
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/ship", headers=headers
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/ship", headers=headers
+    ).status_code == 409
+
+    with SessionLocal() as db:
+        source_balance = db.query(InventoryBalance).filter_by(
+            warehouse_id=source["id"], sku_id=sku_id
+        ).one()
+        target_balance = db.query(InventoryBalance).filter_by(
+            warehouse_id=target_id, sku_id=sku_id
+        ).one()
+        assert (source_balance.on_hand, source_balance.reserved) == (91, 0)
+        assert target_balance.on_hand == 10
+        outbound_reservation = db.query(InventoryReservation).filter_by(
+            order_id=outbound_order_id
+        ).one()
+        assert outbound_reservation.status == "CONSUMED"
+
+        movements = db.query(StockMovement).filter_by(
+            warehouse_id=source["id"], sku_id=sku_id
+        ).order_by(StockMovement.created_at.asc()).all()
+        assert Counter(
+            (movement.movement_type, movement.quantity) for movement in movements
+        ) == Counter(
+            {
+                ("INBOUND", 100),
+                ("TRANSFER_OUT", -10),
+                ("STOCKTAKE", 5),
+                ("RESERVED", 5),
+                ("RESERVED", 4),
+                ("RELEASE", -5),
+                ("OUTBOUND", -4),
+            }
+        )
+        assert {
+            movement.movement_type: movement.balance_after
+            for movement in movements
+            if movement.movement_type != "RESERVED"
+        } == {
+            "INBOUND": 100,
+            "TRANSFER_OUT": 90,
+            "STOCKTAKE": 95,
+            "RELEASE": 91,
+            "OUTBOUND": 91,
+        }
+        # 批量审核按数据库返回顺序预留：先预留 5 件再预留 4 件，可用量依次为 90、86；
+        # 先预留 4 件再预留 5 件则为 91、86。两种顺序都是正确的业务结果，
+        # 这里断言预留后的可用量序列，而不是断言数据库行序。
+        reserved_available = sorted(
+            (
+                movement.balance_after
+                for movement in movements
+                if movement.movement_type == "RESERVED"
+            ),
+            reverse=True,
+        )
+        assert reserved_available in ([90, 86], [91, 86])
