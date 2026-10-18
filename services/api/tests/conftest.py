@@ -44,9 +44,10 @@ def _alembic_config() -> Config:
 
 
 def _reset_postgres_schema() -> None:
-    # make_url() above already refuses anything but erp_stage34_test.  Dropping the
-    # schema therefore only affects the disposable service-container database.
-    Base.metadata.drop_all(bind=engine)
+    # make_url() above already refuses anything but erp_stage34_test.  Downgrade +
+    # upgrade only affects the disposable service-container database and prevents an
+    # existing alembic_version row from turning upgrade(head) into a no-op after cleanup.
+    command.downgrade(_alembic_config(), "base")
     command.upgrade(_alembic_config(), "head")
     with engine.connect() as connection:
         database = connection.execute(text("SELECT current_database()")).scalar_one()
