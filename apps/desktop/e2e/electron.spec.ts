@@ -43,6 +43,15 @@ test('real Electron window logs in, reads orders, sees printers and previews PDF
     await expect(page.getByText(/Agent 已连接/)).toBeVisible();
     await page.getByRole('button', { name: /PDF 打印预览/ }).click();
     await expect(page.getByText(/生成预览失败/)).not.toBeVisible();
+    await page.getByText('商品 SKU', { exact: true }).click();
+    await expect(page.getByRole('heading', { name: '商品 SKU' })).toBeVisible();
+    await expect(page.getByText('304 不锈钢保温杯').first()).toBeVisible({ timeout: 30_000 });
+    await page.getByText('仓库库存', { exact: true }).click();
+    await expect(page.getByRole('heading', { name: '仓库库存' })).toBeVisible();
+    await expect(page.getByText('SO-CUP-450').first()).toBeVisible({ timeout: 30_000 });
+    await page.getByText('扫码验货', { exact: true }).click();
+    await expect(page.getByRole('heading', { name: '扫码验货' })).toBeVisible();
+    await expect(page.getByText('打印成功不等于已经出库')).toBeVisible();
   } finally {
     await app.close();
   }

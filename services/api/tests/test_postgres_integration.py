@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
@@ -155,3 +156,87 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
             record["erp_order_no"] != "SO-TENANT-ISOLATED-0001"
             for record in tenant_orders.json()["records"]
         )
+
+
+def test_postgresql_concurrent_reservation_scan_and_outbound() -> None:
+    client = TestClient(app)
+    headers = _login(client)
+    synced = client.post("/api/v1/orders/mock/sync?count=10", headers=headers)
+    assert synced.status_code == 200
+
+    products = client.get("/api/v1/products", headers=headers).json()
+    target_sku = next(
+        sku
+        for product in products
+        for sku in product["skus"]
+        if sku["sku_code"] == "SO-CUP-450"
+    )
+    warehouse = client.get("/api/v1/warehouses", headers=headers).json()[0]
+    stocktake = client.post(
+        "/api/v1/inventory/stocktake",
+        headers=headers,
+        json={
+            "warehouse_id": warehouse["id"],
+            "sku_id": target_sku["id"],
+            "counted_quantity": 1,
+            "note": "并发预留验收",
+        },
+    )
+    assert stocktake.status_code == 200
+
+    records = client.get("/api/v1/orders?page_size=20", headers=headers).json()["records"]
+    candidates = [
+        record
+        for record in records
+        if record["items"][0]["internal_sku"] == "SO-CUP-450"
+    ][:2]
+    assert len(candidates) == 2
+    with SessionLocal() as db:
+        for candidate in candidates:
+            order = db.get(Order, candidate["id"])
+            order.status = "PENDING_SHIPMENT"
+            order.after_sale_status = "NONE"
+            order.audit_status = "PENDING"
+            order.items[0].quantity = 1
+        db.commit()
+
+    def audit(order_id: str) -> dict:
+        return client.post(
+            "/api/v1/orders/batch/audit", headers=headers, json={"order_ids": [order_id]}
+        ).json()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(audit, [candidate["id"] for candidate in candidates]))
+    assert sum(result["updated"] for result in results) == 1
+    assert any(
+        any("库存不足" in reason for reason in reasons)
+        for result in results
+        for reasons in result["blocked"].values()
+    )
+    reserved_order_id = next(
+        candidate["id"]
+        for candidate, result in zip(candidates, results, strict=True)
+        if result["updated"] == 1
+    )
+    shipment = client.post(
+        f"/api/v1/shipments/prepare?order_id={reserved_order_id}", headers=headers
+    ).json()
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/scan",
+        headers=headers,
+        json={"scan_type": "ORDER", "barcode": shipment["erp_order_no"]},
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/scan",
+        headers=headers,
+        json={"scan_type": "SKU", "barcode": shipment["items"][0]["barcode"]},
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/verify", headers=headers
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/ship", headers=headers
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/shipments/{shipment['id']}/ship", headers=headers
+    ).status_code == 409

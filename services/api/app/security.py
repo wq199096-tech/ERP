@@ -21,10 +21,16 @@ class Principal(BaseModel):
 
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {"orders:read", "orders:audit", "orders:print", "private:read"},
-    "operator": {"orders:read", "orders:print"},
-    "auditor": {"orders:read", "orders:audit"},
-    "viewer": {"orders:read"},
+    "admin": {
+        "orders:read", "orders:audit", "orders:print", "private:read",
+        "inventory:read", "inventory:write", "fulfillment:verify",
+    },
+    "operator": {
+        "orders:read", "orders:print", "inventory:read", "inventory:write",
+        "fulfillment:verify",
+    },
+    "auditor": {"orders:read", "orders:audit", "inventory:read"},
+    "viewer": {"orders:read", "inventory:read"},
 }
 
 

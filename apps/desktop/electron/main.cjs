@@ -12,6 +12,10 @@ const apiPaths = [
   /^\/shops$/,
   /^\/dashboard\/summary$/,
   /^\/orders(?:$|\?|\/)/,
+  /^\/products(?:$|\?|\/)/,
+  /^\/warehouses(?:$|\?|\/)/,
+  /^\/inventory(?:$|\?|\/)/,
+  /^\/shipments(?:$|\?|\/)/,
 ];
 const agentPaths = [
   /^\/health$/,

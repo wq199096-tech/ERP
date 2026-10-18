@@ -9,9 +9,12 @@ import { Avatar, Badge, Dropdown, Input, Layout, Menu, Select, Space, Tag, Toolt
 import { useState } from 'react';
 import { useAppStore } from '../store';
 import { DashboardPage } from '../pages/DashboardPage';
+import { CatalogPage } from '../pages/CatalogPage';
+import { InventoryPage } from '../pages/InventoryPage';
 import { ModulePage } from '../pages/ModulePage';
 import { OrdersPage } from '../pages/OrdersPage';
 import { PrintCenterPage } from '../pages/PrintCenterPage';
+import { VerificationPage } from '../pages/VerificationPage';
 
 const { Header, Sider, Content } = Layout;
 const menu = [
@@ -41,6 +44,9 @@ export function AppShell() {
     if (activeMenu === 'dashboard') return <DashboardPage />;
     if (activeMenu === 'orders') return <OrdersPage />;
     if (activeMenu === 'printing') return <PrintCenterPage />;
+    if (activeMenu === 'verify') return <VerificationPage />;
+    if (activeMenu === 'sku') return <CatalogPage />;
+    if (activeMenu === 'inventory') return <InventoryPage />;
     return <ModulePage moduleKey={activeMenu} />;
   };
   return <Layout className="app-layout">

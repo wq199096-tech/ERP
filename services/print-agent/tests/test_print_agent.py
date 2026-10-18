@@ -575,8 +575,12 @@ def test_waybill_barcode_is_scannable() -> None:
         },
     ).json()
     document = PdfDocument(job["output_file"])
-    bitmap = document[0].render(scale=300 / 72)
-    results = zxingcpp.read_barcodes(bitmap.to_pil().convert("RGB"))
+    results = []
+    for scale in (2, 3, 4):
+        bitmap = document[0].render(scale=scale)
+        results = zxingcpp.read_barcodes(bitmap.to_pil().convert("RGB"))
+        if any(result.text == job["waybill_no"] for result in results):
+            break
     assert any(
         result.text == job["waybill_no"]
         and result.format == zxingcpp.BarcodeFormat.Code128

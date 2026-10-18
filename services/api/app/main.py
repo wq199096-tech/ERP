@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from . import models  # noqa: F401
 from .config import get_settings
 from .database import Base, engine, get_db
-from .routers import auth, dashboard, orders, shops
+from .routers import auth, dashboard, inventory, orders, shops
 
 settings = get_settings()
 app = FastAPI(title="智单 ERP API", version="0.1.0")
@@ -26,6 +26,10 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(orders.router, prefix="/api/v1")
 app.include_router(shops.router, prefix="/api/v1")
 app.include_router(dashboard.router, prefix="/api/v1")
+app.include_router(inventory.product_router, prefix="/api/v1")
+app.include_router(inventory.warehouse_router, prefix="/api/v1")
+app.include_router(inventory.inventory_router, prefix="/api/v1")
+app.include_router(inventory.shipment_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health", tags=["system"])

@@ -11,14 +11,15 @@ from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..adapters import MockPlatformAdapter
 from ..adapters.base import UnifiedItem, UnifiedOrder
-from ..bootstrap import ensure_development_data
+from ..bootstrap import ensure_development_data, ensure_development_inventory
 from ..config import get_settings
 from ..database import get_db
-from ..models import Order, OrderItem, OrderPrivateData, PrintAttempt, PrintJob, Shop
+from ..inventory import release_order_reservations, reserve_order
+from ..models import Order, OrderItem, OrderPrivateData, PrintAttempt, PrintJob, Shop, Warehouse
 from ..privacy import decrypt_private, encrypt_private, mask_address, mask_name, mask_phone
 from ..security import Principal, require_permission
 
@@ -69,6 +70,8 @@ def _print_blockers(order: Order, *, require_audit: bool = True) -> list[str]:
         blockers.append("收货地址异常")
     if not order.stock_available:
         blockers.append("库存不足")
+    if not order.warehouse_id:
+        blockers.append("未分配出库仓库")
     if any(not item.internal_sku for item in order.items):
         blockers.append("存在未映射 SKU")
     return blockers
@@ -83,6 +86,7 @@ def serialize_order(order: Order) -> dict:
         "erp_order_no": order.erp_order_no,
         "version": order.version,
         "package_id": order.package_id,
+        "warehouse_id": order.warehouse_id,
         "status": order.status,
         "after_sale_status": order.after_sale_status,
         "audit_status": order.audit_status,
@@ -113,6 +117,21 @@ def serialize_order(order: Order) -> dict:
     }
 
 
+def _default_warehouse_id(db: Session, tenant_id: str) -> str | None:
+    warehouse = db.scalar(
+        select(Warehouse).where(
+            Warehouse.tenant_id == tenant_id,
+            Warehouse.status == "ACTIVE",
+            Warehouse.is_default.is_(True),
+        )
+    ) or db.scalar(
+        select(Warehouse).where(
+            Warehouse.tenant_id == tenant_id, Warehouse.status == "ACTIVE"
+        )
+    )
+    return warehouse.id if warehouse else None
+
+
 def upsert_unified(db: Session, tenant_id: str, incoming: UnifiedOrder) -> tuple[Order, bool]:
     order = db.scalar(
         select(Order).where(
@@ -137,6 +156,7 @@ def upsert_unified(db: Session, tenant_id: str, incoming: UnifiedOrder) -> tuple
             receiver_address_masked=mask_address(incoming.receiver_address_masked),
             warehouse_name="杭州一号仓",
             package_id=f"PKG-{incoming.platform}-{incoming.platform_order_no[-12:]}",
+            warehouse_id=_default_warehouse_id(db, tenant_id),
             address_valid=len(incoming.receiver_address_masked.strip()) >= 8,
             stock_available=True,
             paid_amount=incoming.paid_amount,
@@ -202,6 +222,7 @@ def sync_mock(
     if settings.is_production or not settings.enable_demo_data:
         raise HTTPException(404, "模拟数据功能未启用")
     ensure_development_data(db)
+    ensure_development_inventory(db)
     created_count = 0
     updated_count = 0
     for incoming in MockPlatformAdapter().fetch_orders(count):
@@ -272,15 +293,59 @@ def batch_audit(
     ).all()
     updated = 0
     blocked: dict[str, list[str]] = {}
+    warehouse = db.scalar(
+        select(Warehouse).where(
+            Warehouse.tenant_id == principal.tenant_id,
+            Warehouse.status == "ACTIVE",
+            Warehouse.is_default.is_(True),
+        )
+    ) or db.scalar(
+        select(Warehouse).where(
+            Warehouse.tenant_id == principal.tenant_id, Warehouse.status == "ACTIVE"
+        )
+    )
+    if not warehouse:
+        raise HTTPException(422, "请先创建可用的出库仓库")
     for order in orders:
         reasons = _print_blockers(order, require_audit=False)
-        if reasons:
+        if reasons and reasons != ["存在未映射 SKU"]:
             blocked[order.id] = reasons
+            continue
+        reserve_reasons = reserve_order(db, order, warehouse.id, principal.user_id)
+        if reserve_reasons:
+            blocked[order.id] = reserve_reasons
             continue
         order.audit_status = "APPROVED"
         updated += 1
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "库存预留并发冲突，请重试") from exc
     return {"updated": updated, "blocked": blocked}
+
+
+@router.post("/{order_id}/cancel")
+def cancel_order(
+    order_id: str,
+    principal: Principal = Depends(require_permission("orders:audit")),
+    db: Session = Depends(get_db),
+) -> dict:
+    order = db.scalar(
+        select(Order)
+        .where(Order.tenant_id == principal.tenant_id, Order.id == order_id)
+        .options(selectinload(Order.items))
+    )
+    if not order:
+        raise HTTPException(404, "订单不存在")
+    if order.status == "SHIPPED":
+        raise HTTPException(409, "订单已出库，不能取消")
+    release_order_reservations(db, order, principal.user_id)
+    order.status = "CANCELLED"
+    order.audit_status = "CANCELLED"
+    order.print_status = "CANCELLED"
+    db.commit()
+    return {"id": order.id, "status": order.status, "released": True}
 
 
 @router.post("/print/prepare")

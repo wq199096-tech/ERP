@@ -1,4 +1,12 @@
-import type { OrderPage, PrintJob } from './types';
+import type {
+  InventoryBalance,
+  OrderPage,
+  PrintJob,
+  Product,
+  Shipment,
+  StockMovement,
+  Warehouse,
+} from './types';
 
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api/v1';
 
@@ -109,6 +117,47 @@ export const api = {
       method: 'POST', token,
       upload: { name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) },
     }),
+  categories: (token: string) =>
+    apiRequest<Array<{ id: string; name: string; status: string }>>('/products/categories', { token }),
+  createCategory: (token: string, name: string) =>
+    apiRequest<{ id: string; name: string }>('/products/categories', {
+      method: 'POST', token, body: { name },
+    }),
+  products: (token: string, keyword = '') =>
+    apiRequest<Product[]>(`/products${keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''}`, { token }),
+  createProduct: (token: string, body: object) =>
+    apiRequest<{ id: string; name: string }>('/products', { method: 'POST', token, body }),
+  createSku: (token: string, body: object) =>
+    apiRequest<{ id: string; sku_code: string }>('/products/skus', { method: 'POST', token, body }),
+  createSkuMapping: (token: string, body: object) =>
+    apiRequest<{ id: string }>('/products/skus/mappings', { method: 'POST', token, body }),
+  warehouses: (token: string) => apiRequest<Warehouse[]>('/warehouses', { token }),
+  createWarehouse: (token: string, body: object) =>
+    apiRequest<{ id: string; name: string }>('/warehouses', { method: 'POST', token, body }),
+  createLocation: (token: string, body: object) =>
+    apiRequest<{ id: string; code: string }>('/warehouses/locations', { method: 'POST', token, body }),
+  inventory: (token: string, params: URLSearchParams) =>
+    apiRequest<InventoryBalance[]>(`/inventory?${params}`, { token }),
+  inventoryInbound: (token: string, body: object) =>
+    apiRequest<{ on_hand: number }>('/inventory/inbound', { method: 'POST', token, body }),
+  inventoryTransfer: (token: string, body: object) =>
+    apiRequest<{ source_on_hand: number; target_on_hand: number }>('/inventory/transfer', {
+      method: 'POST', token, body,
+    }),
+  inventoryStocktake: (token: string, body: object) =>
+    apiRequest<{ on_hand: number }>('/inventory/stocktake', { method: 'POST', token, body }),
+  movements: (token: string, params: URLSearchParams) =>
+    apiRequest<StockMovement[]>(`/inventory/movements?${params}`, { token }),
+  shipments: (token: string, status?: string) =>
+    apiRequest<Shipment[]>(`/shipments${status ? `?status=${status}` : ''}`, { token }),
+  prepareShipment: (token: string, orderId: string) =>
+    apiRequest<Shipment>(`/shipments/prepare?order_id=${orderId}`, { method: 'POST', token }),
+  scanShipment: (token: string, shipmentId: string, body: object) =>
+    apiRequest<Shipment>(`/shipments/${shipmentId}/scan`, { method: 'POST', token, body }),
+  verifyShipment: (token: string, shipmentId: string) =>
+    apiRequest<Shipment>(`/shipments/${shipmentId}/verify`, { method: 'POST', token }),
+  shipShipment: (token: string, shipmentId: string) =>
+    apiRequest<Shipment>(`/shipments/${shipmentId}/ship`, { method: 'POST', token }),
 };
 
 export const printAgent = {
