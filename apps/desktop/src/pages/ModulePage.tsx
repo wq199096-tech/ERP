@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Card, Empty, Space, Table, Tag, Typography } from 'antd';
 
 const moduleCopy: Record<string, { title: string; subtitle: string; stats: string[] }> = {
   batch: { title: '批量打印', subtitle: '按仓库与模板组织大批量打印任务', stats: ['等待 0', '处理中 0', '失败 0'] },
@@ -18,9 +18,8 @@ const moduleCopy: Record<string, { title: string; subtitle: string; stats: strin
 export function ModulePage({ moduleKey }: { moduleKey: string }) {
   const value = moduleCopy[moduleKey] ?? moduleCopy.settings;
   return <div className="page-stack">
-    <div className="page-heading"><div><Typography.Title level={3}>{value.title}</Typography.Title><Typography.Text type="secondary">{value.subtitle}</Typography.Text></div><Button type="primary">新建</Button></div>
-    {['finance', 'ai', 'shops'].includes(moduleKey) && <Alert showIcon type="info" message={moduleKey === 'finance' ? '经营分析不替代专业会计和报税系统' : moduleKey === 'ai' ? 'AI 不会直接修改库存、金额或发起真实发货' : '当前全部平台均为模拟能力，正式授权数为 0'} />}
-    <Row gutter={16}>{value.stats.map((stat, index) => <Col span={8} key={stat}><Card><Statistic title={['总览', '处理中', '异常/待办'][index]} value={stat} /></Card></Col>)}</Row>
+    <div className="page-heading"><div><Typography.Title level={3}>{value.title}</Typography.Title><Typography.Text type="secondary">{value.subtitle}</Typography.Text></div><Tag color="default">开发中</Tag></div>
+    <Alert showIcon type="info" message="该 ERP 模块正在开发中" description="当前没有可用的业务 API；页面不会把示例数字或无效操作展示为实时功能。Stage 4 将继续实现库存与订单履约闭环。" />
     <Card title="业务列表" extra={<Space><Tag>支持筛选</Tag><Tag>支持分页</Tag></Space>}>
       <Table pagination={false} dataSource={[]} columns={[{ title: '编号', dataIndex: 'id' }, { title: '名称', dataIndex: 'name' }, { title: '状态', dataIndex: 'status' }, { title: '更新时间', dataIndex: 'updated' }]} locale={{ emptyText: <Empty description="当前没有业务数据；模块流程与数据模型已预留，Stage 4 继续实现闭环" /> }} />
     </Card>

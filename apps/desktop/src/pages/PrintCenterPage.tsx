@@ -2,8 +2,9 @@ import { FilePdfOutlined, PrinterOutlined, RedoOutlined, WarningOutlined } from 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Col, Form, Input, message, Row, Select, Space, Table, Tag, Typography } from 'antd';
 import { useState } from 'react';
-import { printAgent } from '../api';
-import { LabelDesigner } from '../components/LabelDesigner';
+import { api, printAgent } from '../api';
+import { LabelDesigner, type LabelTemplate } from '../components/LabelDesigner';
+import { useAppStore } from '../store';
 import type { PrintJob } from '../types';
 
 const TYPES = [
@@ -15,8 +16,10 @@ const statusColors: Record<string, string> = { ACKNOWLEDGED: 'processing', FAILE
 const statusLabels: Record<string, string> = { ACKNOWLEDGED: '打印机已接收', FAILED: '失败', UNKNOWN: '状态未知', CANCELLED: '已取消', PRINTED: '已确认出纸', SUBMITTED: '已提交' };
 
 export function PrintCenterPage() {
+  const session = useAppStore((state) => state.session)!;
   const queryClient = useQueryClient();
   const [type, setType] = useState('WAYBILL');
+  const [labelTemplate, setLabelTemplate] = useState<LabelTemplate>();
   const [form] = Form.useForm();
   const printers = useQuery({ queryKey: ['printers'], queryFn: printAgent.printers, retry: false });
   const jobs = useQuery({ queryKey: ['print-jobs'], queryFn: printAgent.jobs, refetchInterval: 5000, retry: false });
@@ -28,17 +31,29 @@ export function PrintCenterPage() {
         job_type: jobType,
         printer_name: values.printer_name,
         payload: { ...values, quantity: Number(values.quantity || 1), barcode: '6970000010011' },
+        ...(jobType === 'PRODUCT_LABEL' && labelTemplate ? { label_template: labelTemplate } : {}),
       });
     },
     onSuccess: (job) => { message.success(`任务已创建，状态：${statusLabels[job.status] ?? job.status}`); queryClient.invalidateQueries({ queryKey: ['print-jobs'] }); },
     onError: (error) => message.error(`Print Agent 不可用：${error.message}`),
   });
-  const retry = useMutation({ mutationFn: printAgent.retry, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['print-jobs'] }) });
+  const retry = useMutation({
+    mutationFn: async (job: PrintJob) => {
+      const retried = await printAgent.retry(job.id);
+      const serverTaskId = job.payload?.server_task_id;
+      if (typeof serverTaskId === 'string') await api.receipt(session.token, serverTaskId, retried);
+      return retried;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['print-jobs'] }),
+  });
   const preview = useMutation({
     mutationFn: async () => {
       const values = form.getFieldsValue();
       const jobType = type.startsWith('MANIFEST') ? (values.paper_size || type) : type;
-      const blob = await printAgent.preview(jobType, values);
+      const blob = await printAgent.preview(jobType, {
+        ...values,
+        ...(jobType === 'PRODUCT_LABEL' && labelTemplate ? { label_template: labelTemplate } : {}),
+      });
       window.open(URL.createObjectURL(blob), '_blank');
     },
     onError: (error) => message.error(error.message),
@@ -51,7 +66,7 @@ export function PrintCenterPage() {
       <Row gutter={16}>
         {TYPES.map((item) => <Col span={8} key={item.value}><Card hoverable className={type === item.value ? 'type-card selected' : 'type-card'} onClick={() => setType(item.value)}><div className="type-icon" style={{ background: `${item.color}18`, color: item.color }}><PrinterOutlined /></div><Typography.Title level={4}>{item.label}</Typography.Title><Typography.Text type="secondary">{item.description}</Typography.Text></Card></Col>)}
       </Row>
-      {type === 'PRODUCT_LABEL' && <LabelDesigner />}
+      {type === 'PRODUCT_LABEL' && <LabelDesigner onChange={setLabelTemplate} />}
       <Card title={`创建${TYPES.find((item) => item.value === type)?.label}`} extra={<Button icon={<FilePdfOutlined />} loading={preview.isPending} onClick={() => preview.mutate()}>PDF 打印预览</Button>}>
         <Form form={form} layout="inline" initialValues={{ order_no: 'SO-DEMO-001', product_name: '304 不锈钢保温杯', quantity: '1', paper_size: 'MANIFEST_A4', printer_name: 'MockPrinter 智单测试打印机' }} onFinish={(values) => create.mutate(values)}>
           <Form.Item name="order_no" label="订单号" rules={[{ required: true }]}><Input style={{ width: 170 }} /></Form.Item>
@@ -70,7 +85,7 @@ export function PrintCenterPage() {
           { title: '测试运单号', dataIndex: 'waybill_no', render: (value) => value ?? '—' },
           { title: '状态', dataIndex: 'status', width: 130, render: (value) => <Tag color={statusColors[value]}>{statusLabels[value] ?? value}</Tag> },
           { title: '说明', dataIndex: 'error_message', ellipsis: true },
-          { title: '操作', width: 100, render: (_, row) => <Space>{['FAILED', 'UNKNOWN'].includes(row.status) && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row.id)}>重试</Button>}</Space> },
+          { title: '操作', width: 100, render: (_, row) => <Space>{['FAILED', 'UNKNOWN'].includes(row.status) && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>重试</Button>}</Space> },
         ]} />
       </Card>
     </div>

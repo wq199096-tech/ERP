@@ -31,6 +31,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255))
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80))
+    role: Mapped[str] = mapped_column(String(30), default="viewer", index=True)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -67,6 +68,10 @@ class Order(Base):
     after_sale_status: Mapped[str] = mapped_column(String(30), default="NONE")
     audit_status: Mapped[str] = mapped_column(String(30), default="PENDING")
     print_status: Mapped[str] = mapped_column(String(30), default="NOT_PRINTED")
+    version: Mapped[int] = mapped_column(default=1)
+    package_id: Mapped[str] = mapped_column(String(80), index=True)
+    address_valid: Mapped[bool] = mapped_column(default=True)
+    stock_available: Mapped[bool] = mapped_column(default=True)
     receiver_name: Mapped[str] = mapped_column(String(80))
     receiver_phone_masked: Mapped[str] = mapped_column(String(30))
     receiver_address_masked: Mapped[str] = mapped_column(String(500))
@@ -120,7 +125,6 @@ Product = _generic("Product", "products")
 ProductSku = _generic("ProductSku", "product_skus")
 ShopSkuMapping = _generic("ShopSkuMapping", "shop_sku_mappings")
 OrderEvent = _generic("OrderEvent", "order_events")
-OrderPrivateData = _generic("OrderPrivateData", "order_private_data")
 Warehouse = _generic("Warehouse", "warehouses")
 InventoryBalance = _generic("InventoryBalance", "inventory_balances")
 InventoryReservation = _generic("InventoryReservation", "inventory_reservations")
@@ -146,10 +150,18 @@ class PrintJob(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(200))
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
+    erp_order_no: Mapped[str] = mapped_column(String(40), index=True)
+    order_version: Mapped[int]
+    package_id: Mapped[str] = mapped_column(String(80), index=True)
+    operation: Mapped[str] = mapped_column(String(20), default="NORMAL")
     job_type: Mapped[str] = mapped_column(String(40), index=True)
     printer_name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(30), index=True, default="CREATED")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    agent_job_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    waybill_no: Mapped[str | None] = mapped_column(String(100))
+    system_job_id: Mapped[str | None] = mapped_column(String(100))
     output_file: Mapped[str | None] = mapped_column(String(500))
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -167,4 +179,19 @@ class PrintAttempt(Base):
     )
     status: Mapped[str] = mapped_column(String(30))
     message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OrderPrivateData(Base):
+    __tablename__ = "order_private_data"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    order_id: Mapped[str] = mapped_column(
+        ForeignKey("orders.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    receiver_name_encrypted: Mapped[str] = mapped_column(Text)
+    receiver_phone_encrypted: Mapped[str] = mapped_column(Text)
+    receiver_address_encrypted: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

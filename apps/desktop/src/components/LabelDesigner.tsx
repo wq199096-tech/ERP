@@ -1,9 +1,16 @@
 import { AlignCenterOutlined, BorderOutlined, DragOutlined } from '@ant-design/icons';
 import { Button, Card, InputNumber, message, Select, Space, Typography } from 'antd';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 type ElementKey = 'name' | 'sku' | 'barcode' | 'qrcode' | 'price';
 type Position = { x: number; y: number };
+export type LabelTemplate = {
+  schema_version: 1;
+  name: string;
+  width_mm: number;
+  height_mm: number;
+  elements: Array<{ kind: 'text' | 'sku' | 'barcode' | 'qrcode' | 'price'; x_mm: number; y_mm: number; width_mm: number; height_mm: number; value: string }>;
+};
 
 const labels: Record<ElementKey, string> = {
   name: '商品名称：304 不锈钢保温杯',
@@ -13,7 +20,7 @@ const labels: Record<ElementKey, string> = {
   price: '零售价：¥69.00',
 };
 
-export function LabelDesigner() {
+export function LabelDesigner({ onChange }: { onChange?: (template: LabelTemplate) => void }) {
   const [preset, setPreset] = useState('60x40');
   const [width, setWidth] = useState(60);
   const [height, setHeight] = useState(40);
@@ -35,9 +42,33 @@ export function LabelDesigner() {
     setPositions((current) => ({ ...current, [key]: { x, y } }));
   };
   const center = () => setPositions((current) => ({ ...current, name: { ...current.name, x: width / 4 } }));
+  const template = useMemo<LabelTemplate>(() => ({
+    schema_version: 1,
+    name: '商品标签',
+    width_mm: width,
+    height_mm: height,
+    elements: (Object.keys(positions) as ElementKey[]).map((key) => ({
+      kind: key === 'name' ? 'text' : key,
+      x_mm: positions[key].x,
+      y_mm: positions[key].y,
+      width_mm: Math.min(key === 'qrcode' ? 10 : 22, width - positions[key].x),
+      height_mm: Math.min(key === 'qrcode' || key === 'barcode' ? 10 : 5, height - positions[key].y),
+      value: '',
+    })),
+  }), [height, positions, width]);
+  useEffect(() => onChange?.(template), [onChange, template]);
   const save = () => {
-    localStorage.setItem('smartorder-label-template', JSON.stringify({ width, height, positions }));
+    localStorage.setItem('smartorder-label-template', JSON.stringify(template));
     message.success('商品标签模板已保存到本机');
+  };
+  const load = () => {
+    const saved = localStorage.getItem('smartorder-label-template');
+    if (!saved) return message.info('本机尚未保存模板');
+    const value = JSON.parse(saved) as LabelTemplate;
+    setWidth(value.width_mm); setHeight(value.height_mm); setPreset('custom');
+    setPositions(Object.fromEntries(value.elements.map((item) => [item.kind === 'text' ? 'name' : item.kind, { x: item.x_mm, y: item.y_mm }])) as Record<ElementKey, Position>);
+    onChange?.(value);
+    message.success('模板已重新加载');
   };
 
   return <Card title="可视化商品标签模板" extra={<Typography.Text type="secondary">拖动字段调整毫米坐标</Typography.Text>}>
@@ -51,6 +82,7 @@ export function LabelDesigner() {
         <Space><InputNumber min={20} max={120} suffix="mm" value={width} disabled={preset !== 'custom'} onChange={(value) => setWidth(value ?? 60)} /><span>×</span><InputNumber min={20} max={180} suffix="mm" value={height} disabled={preset !== 'custom'} onChange={(value) => setHeight(value ?? 40)} /></Space>
         <Button icon={<AlignCenterOutlined />} onClick={center}>名称居中</Button>
         <Button type="primary" onClick={save}>保存模板</Button>
+        <Button onClick={load}>重新加载</Button>
         <Typography.Text type="secondary"><BorderOutlined /> 画布按实际毫米比例缩放</Typography.Text>
       </div>
       <div className="label-stage">

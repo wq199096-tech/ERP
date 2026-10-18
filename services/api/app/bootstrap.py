@@ -2,6 +2,7 @@ from passlib.hash import pbkdf2_sha256
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .config import get_settings
 from .models import Shop, Tenant, User
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
@@ -15,9 +16,13 @@ SHOPS = (
 
 
 def ensure_development_data(db: Session) -> None:
+    settings = get_settings()
+    if settings.is_production or not settings.enable_demo_data:
+        return
     if not db.get(Tenant, TENANT_ID):
         db.add(Tenant(id=TENANT_ID, name="杭州智单演示商贸有限公司"))
-    if not db.get(User, USER_ID):
+    user = db.get(User, USER_ID)
+    if not user:
         db.add(
             User(
                 id=USER_ID,
@@ -25,8 +30,11 @@ def ensure_development_data(db: Session) -> None:
                 email="admin@smartorder.local",
                 password_hash=pbkdf2_sha256.hash("SmartOrder123!"),
                 display_name="演示管理员",
+                role="admin",
             )
         )
+    elif user.email == "admin@smartorder.local":
+        user.role = "admin"
     known = set(db.scalars(select(Shop.id).where(Shop.tenant_id == TENANT_ID)))
     for shop_id, platform, name in SHOPS:
         if shop_id not in known:

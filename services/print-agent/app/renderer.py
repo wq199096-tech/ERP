@@ -34,6 +34,9 @@ def _header(canvas: Canvas, width: float, height: float, title: str) -> None:
 def render_pdf(job_type: str, payload: dict, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     size = PAGE_SIZES.get(job_type, A4)
+    if job_type == "PRODUCT_LABEL" and payload.get("label_template"):
+        template = payload["label_template"]
+        size = (float(template["width_mm"]) * mm, float(template["height_mm"]) * mm)
     width, height = size
     canvas = Canvas(str(target), pagesize=size)
     if job_type == "WAYBILL":
@@ -106,6 +109,9 @@ def _render_manifest(canvas: Canvas, width: float, height: float, payload: dict)
 
 
 def _render_label(canvas: Canvas, width: float, height: float, payload: dict) -> None:
+    if payload.get("label_template"):
+        _render_schema_label(canvas, width, height, payload)
+        return
     canvas.setLineWidth(0.5)
     canvas.rect(2 * mm, 2 * mm, width - 4 * mm, height - 4 * mm)
     canvas.setFont(FONT, 9)
@@ -120,3 +126,41 @@ def _render_label(canvas: Canvas, width: float, height: float, payload: dict) ->
     qr_image.save(qr_buffer, format="PNG")
     qr_buffer.seek(0)
     canvas.drawImage(ImageReader(qr_buffer), width - 14 * mm, 4 * mm, 10 * mm, 10 * mm)
+
+
+def _render_schema_label(canvas: Canvas, width: float, height: float, payload: dict) -> None:
+    template = payload["label_template"]
+    values = {
+        "text": payload.get("product_name", "演示商品"),
+        "sku": payload.get("sku", "SO-DEMO-001"),
+        "barcode": payload.get("barcode", "6970000010011"),
+        "qrcode": payload.get("sku", "SO-DEMO-001"),
+        "price": str(payload.get("price", "¥0.00")),
+    }
+    canvas.setLineWidth(0.4)
+    canvas.rect(0.5 * mm, 0.5 * mm, width - mm, height - mm)
+    for element in template["elements"]:
+        kind = element["kind"]
+        x = float(element["x_mm"]) * mm
+        box_height = float(element["height_mm"]) * mm
+        box_width = float(element["width_mm"]) * mm
+        y = height - (float(element["y_mm"]) * mm) - box_height
+        value = element.get("value") or values[kind]
+        canvas.saveState()
+        path = canvas.beginPath()
+        path.rect(x, y, box_width, box_height)
+        canvas.clipPath(path, stroke=0)
+        if kind in {"text", "sku", "price"}:
+            canvas.setFont(FONT, max(6, min(12, box_height / mm * 0.65)))
+            canvas.drawString(x, y + max(1, box_height * 0.2), str(value))
+        elif kind == "barcode":
+            code = code128.Code128(str(value), barHeight=max(mm, box_height - 2 * mm))
+            code.drawOn(canvas, x, y + mm)
+        else:
+            qr_image = qrcode.make(str(value))
+            qr_buffer = BytesIO()
+            qr_image.save(qr_buffer, format="PNG")
+            qr_buffer.seek(0)
+            side = min(box_width, box_height)
+            canvas.drawImage(ImageReader(qr_buffer), x, y, side, side)
+        canvas.restoreState()

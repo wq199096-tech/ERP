@@ -33,6 +33,7 @@ class PrintStore:
                     payload TEXT NOT NULL,
                     output_file TEXT,
                     waybill_no TEXT,
+                    system_job_id TEXT,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -51,6 +52,9 @@ class PrintStore:
                 );
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(print_jobs)")}
+            if "system_job_id" not in columns:
+                db.execute("ALTER TABLE print_jobs ADD COLUMN system_job_id TEXT")
 
     def recover_interrupted(self) -> int:
         now = datetime.now(UTC).isoformat()
@@ -149,13 +153,15 @@ class PrintStore:
         status: str,
         message: str = "",
         output_file: str | None = None,
+        system_job_id: str | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         with self.connect() as db:
             db.execute(
                 """UPDATE print_jobs SET status = ?, error_message = ?,
-                output_file = COALESCE(?, output_file), updated_at = ? WHERE id = ?""",
-                (status, message or None, output_file, now, job_id),
+                output_file = COALESCE(?, output_file),
+                system_job_id = COALESCE(?, system_job_id), updated_at = ? WHERE id = ?""",
+                (status, message or None, output_file, system_job_id, now, job_id),
             )
             db.execute(
                 "INSERT INTO print_attempts "

@@ -22,6 +22,7 @@ def clean_store():
 
 def test_requires_token() -> None:
     assert client.get("/api/v1/printers").status_code == 401
+    assert client.get("/api/v1/health").status_code == 401
 
 
 def test_three_print_types_create_valid_pdf() -> None:
@@ -56,6 +57,22 @@ def test_waybill_pdf_is_100_by_150_mm() -> None:
     height_mm = float(page.mediabox.height) * 25.4 / 72
     assert width_mm == pytest.approx(100, abs=0.2)
     assert height_mm == pytest.approx(150, abs=0.2)
+
+
+@pytest.mark.parametrize(
+    ("job_type", "expected"),
+    [("MANIFEST_A4", (210, 297)), ("MANIFEST_A5", (148, 210)), ("MANIFEST_80", (80, 180))],
+)
+def test_manifest_paper_sizes(job_type: str, expected: tuple[int, int]) -> None:
+    response = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={"idempotency_key": f"size-{job_type}", "job_type": job_type},
+    ).json()
+    page = PdfReader(response["output_file"]).pages[0]
+    size = (float(page.mediabox.width) * 25.4 / 72, float(page.mediabox.height) * 25.4 / 72)
+    assert size[0] == pytest.approx(expected[0], abs=0.2)
+    assert size[1] == pytest.approx(expected[1], abs=0.2)
 
 
 def test_waybill_idempotency_reuses_number() -> None:
@@ -137,3 +154,43 @@ def test_pause_and_resume_queue() -> None:
     resumed = client.post("/api/v1/queue/resume", headers=HEADERS).json()
     assert resumed["resumed"] == 1
     assert store.get(queued["id"])["status"] == "ACKNOWLEDGED"
+
+
+def test_custom_label_schema_preview_and_bounds() -> None:
+    template = {
+        "schema_version": 1,
+        "name": "40x30 测试模板",
+        "width_mm": 40,
+        "height_mm": 30,
+        "elements": [
+            {"kind": "text", "x_mm": 2, "y_mm": 2, "width_mm": 30, "height_mm": 5},
+            {"kind": "barcode", "x_mm": 2, "y_mm": 10, "width_mm": 35, "height_mm": 10},
+            {"kind": "qrcode", "x_mm": 28, "y_mm": 20, "width_mm": 8, "height_mm": 8},
+        ],
+    }
+    response = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "custom-label-schema-001",
+            "job_type": "PRODUCT_LABEL",
+            "label_template": template,
+            "payload": {"product_name": "边界测试商品", "barcode": "6970000010011"},
+        },
+    )
+    assert response.status_code == 200
+    page = PdfReader(response.json()["output_file"]).pages[0]
+    assert float(page.mediabox.width) * 25.4 / 72 == pytest.approx(40, abs=0.2)
+    bad = template | {
+        "elements": [{"kind": "text", "x_mm": 39, "y_mm": 1, "width_mm": 10, "height_mm": 5}]
+    }
+    invalid = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "custom-label-schema-bad",
+            "job_type": "PRODUCT_LABEL",
+            "label_template": bad,
+        },
+    )
+    assert invalid.status_code == 422

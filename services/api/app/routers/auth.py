@@ -24,11 +24,17 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> dict:
     if not user or not pbkdf2_sha256.verify(payload.password, user.password_hash):
         raise HTTPException(401, "账号或密码错误")
     tenant = db.get(Tenant, user.tenant_id)
-    principal = Principal(user_id=user.id, tenant_id=user.tenant_id, email=user.email)
+    if not user.is_active:
+        raise HTTPException(403, "账号已停用")
+    if not tenant:
+        raise HTTPException(403, "账号所属企业不存在")
+    principal = Principal(
+        user_id=user.id, tenant_id=user.tenant_id, email=user.email, role=user.role
+    )
     return {
         "access_token": create_token(principal),
         "token_type": "bearer",
-        "user": {"id": user.id, "name": user.display_name, "email": user.email},
+        "user": {"id": user.id, "name": user.display_name, "email": user.email, "role": user.role},
         "tenant": {"id": tenant.id, "name": tenant.name},
     }
 

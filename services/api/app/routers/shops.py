@@ -5,14 +5,14 @@ from sqlalchemy.orm import Session
 from ..bootstrap import ensure_development_data
 from ..database import get_db
 from ..models import Shop
-from ..security import Principal, get_principal
+from ..security import Principal, require_permission
 
 router = APIRouter(prefix="/shops", tags=["店铺管理"])
 
 
 @router.get("")
 def list_shops(
-    principal: Principal = Depends(get_principal), db: Session = Depends(get_db)
+    principal: Principal = Depends(require_permission("orders:read")), db: Session = Depends(get_db)
 ) -> list[dict]:
     ensure_development_data(db)
     shops = db.scalars(select(Shop).where(Shop.tenant_id == principal.tenant_id)).all()

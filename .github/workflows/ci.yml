@@ -1,0 +1,49 @@
+name: Stage 3.1 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - run: pip install -r services/api/requirements-dev.txt -r services/print-agent/requirements-dev.txt
+      - run: python -m ruff check app tests
+        working-directory: services/api
+      - run: python -m ruff check app tests
+        working-directory: services/print-agent
+      - run: python -m pytest -q
+        working-directory: services/api
+      - run: python -m pytest -q
+        working-directory: services/print-agent
+
+  desktop-and-windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.25.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: pnpm }
+      - run: pip install -r services/api/requirements-dev.txt -r services/print-agent/requirements-dev.txt
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm exec playwright install chromium
+      - run: pnpm --filter @smartorder/desktop test:e2e
+      - run: pnpm package:win
+      - run: pnpm --filter @smartorder/desktop exec playwright test e2e/packaged.spec.ts
+        env:
+          SMARTORDER_PACKAGED_EXE: ${{ github.workspace }}\apps\desktop\release-local\win-unpacked\智单 ERP.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smartorder-windows-installer
+          path: apps/desktop/release-local/*.exe

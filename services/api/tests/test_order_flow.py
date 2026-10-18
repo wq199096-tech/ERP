@@ -1,21 +1,14 @@
 from io import BytesIO
 
-import pytest
 from fastapi.testclient import TestClient
 
-from app.database import Base, SessionLocal, engine
+from app.bootstrap import TENANT_ID
+from app.database import Base, SessionLocal
 from app.main import app
+from app.models import User
 from app.security import Principal, create_token
 
 client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def clean_database():
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    yield
-
 
 def login() -> str:
     response = client.post(
@@ -60,8 +53,7 @@ def test_tenant_cannot_see_another_tenants_orders() -> None:
     )
     other = create_token(Principal(user_id="other", tenant_id="other", email="other@test"))
     response = client.get("/api/v1/orders", headers={"Authorization": f"Bearer {other}"})
-    assert response.status_code == 200
-    assert response.json()["total"] == 0
+    assert response.status_code == 401
 
 
 def test_csv_duplicate_import_is_idempotent() -> None:
@@ -79,3 +71,83 @@ def test_csv_duplicate_import_is_idempotent() -> None:
     assert second["created"] == 0
     with SessionLocal() as db:
         assert db.execute(Base.metadata.tables["orders"].select()).fetchall()
+
+
+def test_print_pipeline_blocks_then_creates_idempotent_real_order_tasks() -> None:
+    token = login()
+    headers = {"Authorization": f"Bearer {token}"}
+    client.post("/api/v1/orders/mock/sync?count=30", headers=headers)
+    records = client.get("/api/v1/orders?page_size=30", headers=headers).json()["records"]
+    valid = [record for record in records if record["print_blockers"] == ["订单尚未审核"]][:10]
+    assert len(valid) == 10
+    order_ids = [record["id"] for record in valid]
+    audited = client.post(
+        "/api/v1/orders/batch/audit", headers=headers, json={"order_ids": order_ids}
+    ).json()
+    assert audited["updated"] == 10
+    body = {
+        "order_ids": order_ids,
+        "job_types": ["WAYBILL", "MANIFEST_A4", "PRODUCT_LABEL"],
+        "printer_name": "MockPrinter 智单测试打印机",
+    }
+    first = client.post("/api/v1/orders/print/prepare", headers=headers, json=body)
+    assert first.status_code == 200
+    assert len(first.json()["tasks"]) == 30
+    second = client.post("/api/v1/orders/print/prepare", headers=headers, json=body)
+    assert [task["id"] for task in first.json()["tasks"]] == [
+        task["id"] for task in second.json()["tasks"]
+    ]
+    task = first.json()["tasks"][0]
+    receipt = client.post(
+        f"/api/v1/orders/print/tasks/{task['id']}/receipt",
+        headers=headers,
+        json={"agent_job_id": "agent-1", "status": "FAILED", "error_message": "模拟失败"},
+    )
+    assert receipt.json()["order_print_status"] == "FAILED"
+
+
+def test_viewer_cannot_audit_or_print() -> None:
+    login()
+    with SessionLocal() as db:
+        viewer = User(
+            tenant_id=TENANT_ID,
+            email="viewer@smartorder.local",
+            password_hash="unused",
+            display_name="只读用户",
+            role="viewer",
+        )
+        db.add(viewer)
+        db.commit()
+        token = create_token(
+            Principal(user_id=viewer.id, tenant_id=TENANT_ID, email=viewer.email, role="viewer")
+        )
+    response = client.post(
+        "/api/v1/orders/batch/audit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"order_ids": ["missing"]},
+    )
+    assert response.status_code == 403
+
+
+def test_cancelled_refund_and_unaudited_orders_cannot_bypass_checks() -> None:
+    token = login()
+    headers = {"Authorization": f"Bearer {token}"}
+    client.post("/api/v1/orders/mock/sync?count=20", headers=headers)
+    records = client.get("/api/v1/orders?page_size=20", headers=headers).json()["records"]
+    rejected = [
+        record
+        for record in records
+        if record["status"] == "CANCELLED" or record["after_sale_status"] != "NONE"
+    ][:2]
+    pending = next(record for record in records if record["print_blockers"] == ["订单尚未审核"])
+    response = client.post(
+        "/api/v1/orders/print/prepare",
+        headers=headers,
+        json={
+            "order_ids": [record["id"] for record in rejected] + [pending["id"]],
+            "job_types": ["WAYBILL"],
+            "printer_name": "MockPrinter 智单测试打印机",
+        },
+    ).json()
+    assert response["tasks"] == []
+    assert len(response["blocked"]) == 3

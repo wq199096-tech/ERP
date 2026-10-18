@@ -2,13 +2,14 @@ import secrets
 import uuid
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .config import get_settings
-from .printers import list_printers
+from .printers import list_printers, submit_pdf
 from .renderer import render_pdf
+from .schemas import LabelTemplate
 from .store import FINAL_STATES, RETRYABLE_STATES, PrintStore
 
 settings = get_settings()
@@ -26,15 +27,19 @@ class JobRequest(BaseModel):
     printer_name: str = "MockPrinter 智单测试打印机"
     payload: dict = Field(default_factory=dict)
     simulate_result: Literal["success", "failure", "unknown"] = "success"
+    label_template: LabelTemplate | None = None
 
 
-def authorize(authorization: str | None = Header(default=None)) -> None:
+def authorize(request: Request, authorization: str | None = Header(default=None)) -> None:
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(403, "Print Agent 仅接受本机请求")
     expected = f"Bearer {settings.print_agent_token}"
     if not authorization or not secrets.compare_digest(authorization, expected):
         raise HTTPException(401, "Print Agent 访问令牌无效")
 
 
-@app.get("/api/v1/health")
+@app.get("/api/v1/health", dependencies=[Depends(authorize)])
 def health() -> dict:
     return {
         "status": "ok",
@@ -63,6 +68,17 @@ def _execute(job: dict, simulate_result: str) -> dict:
     payload = job["payload"] | ({"waybill_no": job["waybill_no"]} if job["waybill_no"] else {})
     render_pdf(job["job_type"], payload, output)
     store.transition(job["id"], "SUBMITTED", output_file=str(output))
+    if not job["printer_name"].startswith("MockPrinter"):
+        try:
+            spooler_job_id = submit_pdf(job["printer_name"], output, job["id"])
+            return store.transition(
+                job["id"],
+                "SUBMITTED",
+                "Windows Spooler 已接收；实际出纸状态需人工或设备回执确认",
+                system_job_id=spooler_job_id,
+            )
+        except RuntimeError as exc:
+            return store.transition(job["id"], "FAILED", str(exc))
     if simulate_result == "failure":
         return store.transition(job["id"], "FAILED", "MockPrinter 模拟离线")
     if simulate_result == "unknown":
@@ -81,12 +97,17 @@ def create_job(payload: JobRequest) -> dict:
         return existing | {"deduplicated": True}
     waybill_no = None
     if payload.job_type == "WAYBILL":
-        waybill_no = f"TEST-{uuid.uuid4().hex[:16].upper()}"
+        waybill_no = payload.payload.get("reuse_waybill_no") or (
+            f"TEST-{uuid.uuid4().hex[:16].upper()}"
+        )
+    request_payload = payload.payload
+    if payload.job_type == "PRODUCT_LABEL" and payload.label_template:
+        request_payload = request_payload | {"label_template": payload.label_template.model_dump()}
     job = store.create(
         idempotency_key=payload.idempotency_key,
         job_type=payload.job_type,
         printer_name=payload.printer_name,
-        payload=payload.payload,
+        payload=request_payload,
         waybill_no=waybill_no,
     )
     if store.is_queue_paused():
@@ -144,6 +165,10 @@ def confirm_printed(job_id: str) -> dict:
 
 @app.post("/api/v1/preview/{job_type}", dependencies=[Depends(authorize)])
 def preview(job_type: JobType, payload: dict | None = None) -> FileResponse:
+    if job_type == "PRODUCT_LABEL" and payload and payload.get("label_template"):
+        payload = payload | {
+            "label_template": LabelTemplate.model_validate(payload["label_template"]).model_dump()
+        }
     output = settings.output_path / f"preview-{job_type.lower()}-{uuid.uuid4().hex[:8]}.pdf"
     render_pdf(job_type, payload or {}, output)
     return FileResponse(output, media_type="application/pdf", filename=output.name)

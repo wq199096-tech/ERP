@@ -55,9 +55,9 @@ export function AppShell() {
         <Select defaultValue="all" variant="borderless" className="shop-selector" options={[{ value: 'all', label: '全部店铺 · 4 个模拟店' }, { value: 'douyin', label: '抖音旗舰店' }, { value: 'pdd', label: '拼多多一号店' }]} />
         <Input prefix={<SearchOutlined />} placeholder="搜索订单、商品、SKU" className="global-search" />
         <Space size={18} className="header-actions">
-          <Tooltip title="订单同步正常"><Tag icon={<SyncOutlined spin />} color="processing">同步正常</Tag></Tooltip>
-          <Tooltip title="MockPrinter 已连接"><Tag icon={<PrinterOutlined />} color="success">打印机已连接</Tag></Tooltip>
-          <Badge count={3} size="small"><BellOutlined className="header-icon" /></Badge>
+          <Tooltip title="实时同步状态请查看订单管理"><Tag icon={<SyncOutlined />} color="default">同步状态未提供</Tag></Tooltip>
+          <Tooltip title="实时打印机状态请查看智能打单"><Tag icon={<PrinterOutlined />} color="default">打印状态未提供</Tag></Tooltip>
+          <Badge count={0} size="small"><BellOutlined className="header-icon" /></Badge>
           <Dropdown menu={{ items: [{ key: 'profile', icon: <UserOutlined />, label: '个人资料' }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: () => setSession(null) }] }}>
             <Space className="user-block"><Avatar size="small">管</Avatar><span>{session?.userName}</span></Space>
           </Dropdown>

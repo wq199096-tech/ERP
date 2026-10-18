@@ -18,3 +18,4 @@ services/print-agent/output/
 services/print-agent/**/data/
 services/print-agent/**/output/
 
+services/print-agent/e2e-output*/
