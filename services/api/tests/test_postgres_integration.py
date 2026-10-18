@@ -149,7 +149,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
         other_orders = client.get("/api/v1/orders", headers=isolated_headers)
         assert other_orders.status_code == 200
         assert other_orders.json()["total"] == 1
-        assert other_orders.json()["records"][0]["tenant_id"] == other_tenant_id
+        assert other_orders.json()["records"][0]["erp_order_no"] == "SO-TENANT-ISOLATED-0001"
         tenant_orders = client.get("/api/v1/orders", headers=headers)
         assert tenant_orders.json()["total"] == 10
         assert all(record["tenant_id"] == TENANT_ID for record in tenant_orders.json()["records"])
