@@ -96,6 +96,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
         other_user_id = "00000000-0000-0000-0000-000000000202"
         other_shop_id = "00000000-0000-0000-0000-000000001005"
         db.add(Tenant(id=other_tenant_id, name="隔离验证企业"))
+        db.flush()
         db.add(
             User(
                 id=other_user_id,
@@ -106,6 +107,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
                 role="admin",
             )
         )
+        db.flush()
         db.add(
             Shop(
                 id=other_shop_id,
@@ -115,6 +117,7 @@ def test_postgresql_order_uniqueness_transaction_rollback_and_tenant_isolation()
                 name="隔离店铺",
             )
         )
+        db.flush()
         db.add(
             Order(
                 tenant_id=other_tenant_id,
