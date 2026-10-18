@@ -38,6 +38,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm exec playwright install chromium
+        working-directory: apps/desktop
       - run: pnpm --filter @smartorder/desktop test:e2e
       - run: pnpm package:win
       - run: pnpm --filter @smartorder/desktop exec playwright test e2e/packaged.spec.ts
