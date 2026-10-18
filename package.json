@@ -1,0 +1,16 @@
+{
+  "name": "smartorder-erp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev": "pnpm --filter @smartorder/desktop dev",
+    "dev:web": "pnpm --filter @smartorder/desktop dev:web",
+    "lint": "pnpm --filter @smartorder/desktop lint",
+    "typecheck": "pnpm --filter @smartorder/desktop typecheck",
+    "test": "pnpm --filter @smartorder/desktop test",
+    "build": "pnpm --filter @smartorder/desktop build",
+    "package:win": "pnpm --filter @smartorder/desktop package:win"
+  }
+}
+
