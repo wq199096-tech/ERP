@@ -51,7 +51,12 @@ async function proxyRequest(baseUrl, request, patterns, serviceToken) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(request.body);
   }
-  const response = await fetch(`${baseUrl}${request.path}`, { method, headers, body });
+  let response;
+  try {
+    response = await fetch(`${baseUrl}${request.path}`, { method, headers, body });
+  } catch (error) {
+    throw new Error(`无法连接 ${baseUrl}；请确认对应服务已启动且地址正确。`);
+  }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(typeof detail.detail === 'string' ? detail.detail : JSON.stringify(detail.detail));
@@ -94,12 +99,36 @@ function createWindow() {
   else window.loadURL(process.env.SMARTORDER_RENDERER_URL || 'http://127.0.0.1:5173');
 }
 
+async function checkPackagedServices() {
+  if (!app.isPackaged) return;
+  const problems = [];
+  try {
+    const response = await fetch(`${API_URL}/health`);
+    if (!response.ok) problems.push('后端 API 健康检查失败');
+  } catch {
+    problems.push('无法连接后端 API，请先启动后端或检查 SMARTORDER_API_URL');
+  }
+  try {
+    const response = await fetch(`${AGENT_URL}/health`, {
+      headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+    });
+    if (!response.ok) problems.push('Print Agent 健康检查失败');
+  } catch {
+    problems.push('无法连接本机打印服务，请先启动 Print Agent 或检查 SMARTORDER_PRINT_AGENT_URL');
+  }
+  if (problems.length > 0) {
+    const { dialog } = require('electron');
+    dialog.showErrorBox('智单 ERP 完整系统未就绪', `${problems.join('\n')}\n\n桌面窗口可以打开，但完整业务功能尚不可用。`);
+  }
+}
+
 app.whenReady().then(() => {
   if (app.isPackaged && !AGENT_TOKEN) {
     const { dialog } = require('electron');
     dialog.showErrorBox('智单 ERP 未完全可用', PRINT_AGENT_TOKEN_ERROR);
   }
   createWindow();
+  void checkPackagedServices();
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 app.on('window-all-closed', () => process.platform !== 'darwin' && app.quit());

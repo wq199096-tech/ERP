@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.bootstrap import TENANT_ID
 from app.database import Base, SessionLocal
 from app.main import app
-from app.models import User
+from app.models import PrintAttempt, User
 from app.security import Principal, create_token
 
 client = TestClient(app)
@@ -114,6 +114,15 @@ def test_print_pipeline_blocks_then_creates_idempotent_real_order_tasks() -> Non
         json={"agent_job_id": "agent-1", "status": "FAILED", "error_message": "模拟失败"},
     )
     assert receipt.json()["order_print_status"] == "FAILED"
+    with SessionLocal() as db:
+        attempts = (
+            db.query(PrintAttempt)
+            .filter(PrintAttempt.print_job_id == task["id"])
+            .all()
+        )
+    assert len(attempts) == 1
+    assert attempts[0].status == "FAILED"
+    assert "agent-1" in attempts[0].message
     blocked_receipt = client.post(
         f"/api/v1/orders/print/tasks/{task['id']}/receipt",
         headers=headers,

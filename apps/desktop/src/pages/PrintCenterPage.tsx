@@ -1,8 +1,8 @@
 import { FilePdfOutlined, PrinterOutlined, RedoOutlined, WarningOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Col, Form, Input, message, Row, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Form, Input, message, Modal, Row, Select, Space, Table, Tag, Typography } from 'antd';
 import { useState } from 'react';
-import { api, printAgent } from '../api';
+import { api, printAgent, type JobVerification, type ManualRetryRequest } from '../api';
 import { LabelDesigner, type LabelTemplate } from '../components/LabelDesigner';
 import { useAppStore } from '../store';
 import type { PrintJob } from '../types';
@@ -21,6 +21,9 @@ export function PrintCenterPage() {
   const [type, setType] = useState('WAYBILL');
   const [labelTemplate, setLabelTemplate] = useState<LabelTemplate>();
   const [form] = Form.useForm();
+  const [verificationJob, setVerificationJob] = useState<PrintJob>();
+  const [verificationInfo, setVerificationInfo] = useState<JobVerification>();
+  const [operatorNote, setOperatorNote] = useState('');
   const printers = useQuery({ queryKey: ['printers'], queryFn: printAgent.printers, retry: false });
   const jobs = useQuery({ queryKey: ['print-jobs'], queryFn: printAgent.jobs, refetchInterval: 5000, retry: false });
   const buildTestPayload = (values: Record<string, string>) => ({
@@ -40,6 +43,7 @@ export function PrintCenterPage() {
       specification: '测试规格',
       quantity: Number(values.quantity || 1),
       barcode: '6970000010011',
+      copies: Number(values.quantity || 1),
     }],
   });
   const create = useMutation({
@@ -56,14 +60,28 @@ export function PrintCenterPage() {
     onSuccess: (job) => { message.success(`任务已创建，状态：${statusLabels[job.status] ?? job.status}`); queryClient.invalidateQueries({ queryKey: ['print-jobs'] }); },
     onError: (error) => message.error(`Print Agent 不可用：${error.message}`),
   });
+  const openVerification = async (job: PrintJob) => {
+    setVerificationJob(job);
+    setVerificationInfo(undefined);
+    setOperatorNote('');
+    try {
+      setVerificationInfo(await printAgent.verification(job.id));
+    } catch (error) {
+      message.error((error as Error).message);
+    }
+  };
   const retry = useMutation({
-    mutationFn: async (job: PrintJob) => {
-      const retried = await printAgent.retry(job.id, job.status === 'UNKNOWN');
-      const serverTaskId = job.payload?.server_task_id;
+    mutationFn: async (input: { job: PrintJob; body?: ManualRetryRequest }) => {
+      const retried = await printAgent.retry(input.job.id, input.body);
+      const serverTaskId = input.job.payload?.server_task_id;
       if (typeof serverTaskId === 'string') await api.receipt(session.token, serverTaskId, retried);
       return retried;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['print-jobs'] }),
+    onSuccess: () => {
+      setVerificationJob(undefined);
+      setVerificationInfo(undefined);
+      queryClient.invalidateQueries({ queryKey: ['print-jobs'] });
+    },
   });
   const preview = useMutation({
     mutationFn: async () => {
@@ -106,12 +124,48 @@ export function PrintCenterPage() {
           { title: '说明', dataIndex: 'error_message', ellipsis: true },
           { title: '操作', width: 130, render: (_, row) => (
             <Space>
-              {row.status === 'FAILED' && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>重试</Button>}
-              {row.status === 'UNKNOWN' && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>人工核验后重试</Button>}
+              {row.status === 'FAILED' && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate({ job: row })}>重试</Button>}
+              {row.status === 'UNKNOWN' && <Button type="link" icon={<RedoOutlined />} onClick={() => openVerification(row)}>人工核验后重试</Button>}
             </Space>
           ) },
         ]} />
       </Card>
+      <Modal
+        open={Boolean(verificationJob)}
+        title="人工核验未知打印状态"
+        okText="确认后安全重试"
+        cancelText="取消"
+        okButtonProps={{ disabled: !verificationInfo || operatorNote.trim().length < 4, loading: retry.isPending }}
+        onOk={() => verificationJob && verificationInfo && retry.mutate({
+          job: verificationJob,
+          body: {
+            confirmed_waybill_no: verificationInfo.waybill_no || 'NO_WAYBILL',
+            confirmed_spooler_status: verificationInfo.spooler_status.status,
+            operator_name: session.userName,
+            operator_note: operatorNote.trim(),
+          },
+        })}
+        onCancel={() => setVerificationJob(undefined)}
+      >
+        {verificationInfo && (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Typography.Text strong>必须先核对以下原始数据：</Typography.Text>
+            <Typography.Paragraph>打印任务：{verificationInfo.job_id}</Typography.Paragraph>
+            <Typography.Paragraph>ERP 订单号：{verificationInfo.erp_order_no ?? '—'}</Typography.Paragraph>
+            <Typography.Paragraph>原运单号：{verificationInfo.waybill_no ?? '无运单'}</Typography.Paragraph>
+            <Typography.Paragraph>Spooler Job：{verificationInfo.system_job_id ?? '无'}</Typography.Paragraph>
+            <Typography.Paragraph>
+              Spooler 状态：{verificationInfo.spooler_status.status} · {verificationInfo.spooler_status.message}
+            </Typography.Paragraph>
+            <Input.TextArea
+              value={operatorNote}
+              onChange={(event) => setOperatorNote(event.target.value)}
+              placeholder="填写人工核对结论和依据，至少 4 个字符"
+              rows={3}
+            />
+          </Space>
+        )}
+      </Modal>
     </div>
   );
 }

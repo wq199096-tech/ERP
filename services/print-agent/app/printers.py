@@ -3,6 +3,7 @@ import math
 import platform
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 PRINTER_STATUS_MAP = {
@@ -165,11 +166,7 @@ def get_spooler_job_status(printer_name: str, system_job_id: str) -> dict[str, s
         win32print.ClosePrinter(handle)
 
 
-def submit_pdf(printer_name: str, pdf_path: Path, document_name: str) -> str:
-    """Render a PDF and submit it through Windows GDI, preserving the Spooler job id."""
-    if platform.system() != "Windows":
-        raise RuntimeError("真实打印仅支持 Windows")
-    _check_printer_status(printer_name)
+def _import_gdi() -> Any:
     try:
         import pywintypes  # type: ignore[import-not-found]
         import win32con  # type: ignore[import-not-found]
@@ -179,53 +176,76 @@ def submit_pdf(printer_name: str, pdf_path: Path, document_name: str) -> str:
         from PIL.ImageWin import Dib
     except ImportError as exc:
         raise RuntimeError("缺少 pywin32/Pillow，无法访问 Windows GDI 打印") from exc
+    return SimpleNamespace(
+        pywintypes=pywintypes,
+        win32con=win32con,
+        win32gui=win32gui,
+        win32print=win32print,
+        win32ui=win32ui,
+        Dib=Dib,
+    )
 
-    try:
-        images, page_size = _render_pdf_pages(pdf_path)
-    except Exception as exc:
-        if isinstance(exc, RuntimeError):
-            raise
-        raise RuntimeError("PDF 渲染失败") from exc
 
-    handle = win32print.OpenPrinter(printer_name)
+def _fit_rect(
+    image_width: int,
+    image_height: int,
+    page_width: int,
+    page_height: int,
+) -> tuple[int, int, int, int]:
+    scale = min(page_width / image_width, page_height / image_height)
+    width = max(1, round(image_width * scale))
+    height = max(1, round(image_height * scale))
+    x = max(0, (page_width - width) // 2)
+    y = max(0, (page_height - height) // 2)
+    return x, y, x + width, y + height
+
+
+def _submit_with_gdi(
+    printer_name: str,
+    images: list[Any],
+    page_size: tuple[float, float],
+    document_name: str,
+    gdi: Any,
+) -> str:
+    handle = gdi.win32print.OpenPrinter(printer_name)
     device_context = None
     document_started = False
     try:
-        info = win32print.GetPrinter(handle, 2)
-        processor = info.get("pPrintProcessor") or "winspool"
-        mode_size = win32print.DocumentProperties(0, handle, printer_name, None, None, 0)
-        driver_extra = max(mode_size - pywintypes.DEVMODEType().Size, 0)
-        devmode = pywintypes.DEVMODEType(driver_extra)
-        devmode.Fields |= win32con.DM_PAPERSIZE
-        devmode.Fields |= win32con.DM_PAPERWIDTH
-        devmode.Fields |= win32con.DM_PAPERLENGTH
-        devmode.Fields |= win32con.DM_ORIENTATION
-        devmode.PaperSize = win32con.DMPAPER_USER
+        info = gdi.win32print.GetPrinter(handle, 2)
+        _ = info.get("pPrintProcessor") or "winspool"
+        mode_size = gdi.win32print.DocumentProperties(0, handle, printer_name, None, None, 0)
+        driver_extra = max(mode_size - gdi.pywintypes.DEVMODEType().Size, 0)
+        devmode = gdi.pywintypes.DEVMODEType(driver_extra)
+        devmode.Fields |= gdi.win32con.DM_PAPERSIZE
+        devmode.Fields |= gdi.win32con.DM_PAPERWIDTH
+        devmode.Fields |= gdi.win32con.DM_PAPERLENGTH
+        devmode.Fields |= gdi.win32con.DM_ORIENTATION
+        devmode.PaperSize = gdi.win32con.DMPAPER_USER
         devmode.PaperWidth = int(page_size[0] * 10)
         devmode.PaperLength = int(page_size[1] * 10)
-        devmode.Orientation = win32con.DMORIENT_PORTRAIT
-        win32print.DocumentProperties(
+        devmode.Orientation = gdi.win32con.DMORIENT_PORTRAIT
+        gdi.win32print.DocumentProperties(
             0,
             handle,
             printer_name,
             devmode,
             devmode,
-            win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER,
+            gdi.win32con.DM_IN_BUFFER | gdi.win32con.DM_OUT_BUFFER,
         )
-        hdc = win32gui.CreateDC(processor, printer_name, devmode)
-        device_context = win32ui.CreateDCFromHandle(hdc)
-        job_id = win32print.StartDoc(
+        hdc = gdi.win32gui.CreateDC("WINSPOOL", printer_name, devmode)
+        device_context = gdi.win32ui.CreateDCFromHandle(hdc)
+        job_id = gdi.win32print.StartDoc(
             device_context.GetHandleOutput(), (document_name, None, None, 0)
         )
         document_started = True
-        page_width = device_context.GetDeviceCaps(win32con.HORZRES)
-        page_height = device_context.GetDeviceCaps(win32con.VERTRES)
+        page_width = device_context.GetDeviceCaps(gdi.win32con.HORZRES)
+        page_height = device_context.GetDeviceCaps(gdi.win32con.VERTRES)
         device_context.StartPage()
         for image in images:
-            dib = Dib(image)
+            dib = gdi.Dib(image)
             dib.draw(
                 device_context.GetHandleOutput(),
-                (0, 0, page_width, page_height),
+                _fit_rect(image.width, image.height, page_width, page_height),
             )
             device_context.EndPage()
             if image is not images[-1]:
@@ -242,6 +262,32 @@ def submit_pdf(printer_name: str, pdf_path: Path, document_name: str) -> str:
     finally:
         if device_context is not None:
             device_context.DeleteDC()
-        win32print.ClosePrinter(handle)
+        gdi.win32print.ClosePrinter(handle)
         for image in images:
             image.close()
+
+
+def submit_pdf(
+    printer_name: str,
+    pdf_path: Path,
+    document_name: str,
+    *,
+    gdi: Any | None = None,
+) -> str:
+    """Render a PDF and submit it through Windows GDI, preserving the Spooler job id."""
+    if platform.system() != "Windows":
+        raise RuntimeError("真实打印仅支持 Windows")
+    _check_printer_status(printer_name)
+    try:
+        images, page_size = _render_pdf_pages(pdf_path)
+    except Exception as exc:
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError("PDF 渲染失败") from exc
+    return _submit_with_gdi(
+        printer_name,
+        images,
+        page_size,
+        document_name,
+        gdi or _import_gdi(),
+    )

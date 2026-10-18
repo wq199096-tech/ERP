@@ -1,9 +1,12 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from . import models  # noqa: F401
 from .config import get_settings
-from .database import Base, engine
+from .database import Base, engine, get_db
 from .routers import auth, dashboard, orders, shops
 
 settings = get_settings()
@@ -26,5 +29,9 @@ app.include_router(dashboard.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health", tags=["system"])
-def health() -> dict[str, str]:
+def health(db: Session = Depends(get_db)) -> dict[str, str]:
+    try:
+        db.execute(text("SELECT 1"))
+    except OperationalError as exc:
+        raise HTTPException(503, "数据库健康检查失败") from exc
     return {"status": "ok", "service": "smartorder-api", "environment": settings.app_env}

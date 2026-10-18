@@ -39,6 +39,27 @@ export type PreparedTask = {
   payload: Record<string, unknown>;
 };
 
+export type ManualRetryRequest = {
+  confirmed_waybill_no: string;
+  confirmed_spooler_status: string;
+  operator_name?: string;
+  operator_note: string;
+};
+
+export type JobVerification = {
+  job_id: string;
+  job_type: string;
+  status: string;
+  printer_name: string;
+  erp_order_no?: string;
+  package_id?: string;
+  waybill_no?: string | null;
+  system_job_id?: string | null;
+  output_file?: string | null;
+  spooler_status: { status: string; message: string };
+  attempts: Array<{ status: string; message: string; created_at: string }>;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     apiRequest<{
@@ -97,10 +118,9 @@ export const printAgent = {
   spoolerStatus: (id: string) =>
     agentRequest<{ status: string; message: string }>(`/jobs/${id}/spooler-status`),
   create: (body: object) => agentRequest<PrintJob>('/jobs', { method: 'POST', body }),
-  retry: (id: string, allowUnknownResubmit = false) =>
-    agentRequest<PrintJob>(`/jobs/${id}/retry?allow_unknown_resubmit=${allowUnknownResubmit}`, {
-      method: 'POST',
-    }),
+  verification: (id: string) => agentRequest<JobVerification>(`/jobs/${id}/verification`),
+  retry: (id: string, body: ManualRetryRequest = { confirmed_waybill_no: '', confirmed_spooler_status: 'NO_SPOOLER', operator_note: '失败重试' }) =>
+    agentRequest<PrintJob>(`/jobs/${id}/retry`, { method: 'POST', body }),
   preview: async (jobType: string, payload: object) => {
     const result = await agentRequest<{ binary: string; type: string }>(`/preview/${jobType}`, {
       method: 'POST', body: payload,

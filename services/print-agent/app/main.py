@@ -31,6 +31,13 @@ class JobRequest(BaseModel):
     label_template: LabelTemplate | None = None
 
 
+class ManualRetryRequest(BaseModel):
+    confirmed_waybill_no: str = Field(default="", max_length=100)
+    confirmed_spooler_status: str = Field(min_length=1, max_length=50)
+    operator_name: str = Field(default="local-operator", min_length=1, max_length=100)
+    operator_note: str = Field(min_length=4, max_length=1000)
+
+
 def authorize(request: Request, authorization: str | None = Header(default=None)) -> None:
     client_host = request.client.host if request.client else ""
     if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
@@ -38,6 +45,31 @@ def authorize(request: Request, authorization: str | None = Header(default=None)
     expected = f"Bearer {settings.print_agent_token}"
     if not authorization or not secrets.compare_digest(authorization, expected):
         raise HTTPException(401, "Print Agent 访问令牌无效")
+
+
+def reconcile_unknown_jobs() -> int:
+    """Automatically verify, but never resubmit, jobs that may have reached a spooler."""
+    changed = 0
+    for job in store.list_by_status("UNKNOWN", limit=1000):
+        if not job["system_job_id"] or job["printer_name"].startswith("MockPrinter"):
+            continue
+        try:
+            result = get_spooler_job_status(job["printer_name"], job["system_job_id"])
+            message = f"重启后 Spooler 自动核对：{result['message']}"
+            new_status = (
+                result["status"] if result["status"] in {"PRINTED", "FAILED"} else "UNKNOWN"
+            )
+        except Exception as exc:
+            message = f"重启后 Spooler 核对失败：{exc}"
+            new_status = "UNKNOWN"
+        current = store.get(job["id"])
+        if current and current["status"] != new_status:
+            store.transition(job["id"], new_status, message)
+            changed += 1
+    return changed
+
+
+reconciled_jobs = reconcile_unknown_jobs()
 
 
 @app.get("/api/v1/health", dependencies=[Depends(authorize)])
@@ -48,6 +80,7 @@ def health() -> dict:
         "mode": "MOCK_ENABLED",
         "queue_paused": store.is_queue_paused(),
         "recovered_jobs": recovered_jobs,
+        "reconciled_jobs": reconciled_jobs,
     }
 
 
@@ -94,6 +127,15 @@ def _execute(job: dict, simulate_result: str) -> dict:
         "ACKNOWLEDGED",
         "MockPrinter 已接收；不等同于真实纸张已输出",
     )
+
+
+def _spooler_status_for_job(job: dict) -> dict[str, str]:
+    if not job["system_job_id"]:
+        return {"status": "NO_SPOOLER", "message": "任务尚未获得 Spooler 作业标识"}
+    try:
+        return get_spooler_job_status(job["printer_name"], job["system_job_id"])
+    except Exception as exc:
+        return {"status": "UNKNOWN", "message": f"Spooler 状态查询失败：{exc}"}
 
 
 @app.post("/api/v1/jobs", dependencies=[Depends(authorize)])
@@ -145,21 +187,35 @@ def resume_queue() -> dict:
 def retry_job(
     job_id: str,
     simulate_result: str = "success",
-    allow_unknown_resubmit: bool = False,
+    body: ManualRetryRequest | None = None,
 ) -> dict:
     job = store.get(job_id)
     if not job:
         raise HTTPException(404, "打印任务不存在")
     if job["status"] not in RETRYABLE_STATES:
         raise HTTPException(409, "仅失败或状态未知的任务允许重试")
-    if job["status"] == "UNKNOWN" and not allow_unknown_resubmit:
-        raise HTTPException(409, "状态未知必须先人工核验，确认后才能重新提交")
-    if job["status"] == "UNKNOWN" and job["system_job_id"]:
+    if job["status"] == "UNKNOWN":
+        if body is None:
+            raise HTTPException(422, "状态未知重试必须提交人工核验结果")
+        expected_waybill = job["waybill_no"] or "NO_WAYBILL"
+        expected_status = _spooler_status_for_job(job)["status"]
+        if not secrets.compare_digest(body.confirmed_waybill_no, expected_waybill):
+            raise HTTPException(409, "人工核验的原运单号不一致")
+        if not secrets.compare_digest(body.confirmed_spooler_status, expected_status):
+            raise HTTPException(409, "人工核验的 Spooler 状态不一致")
+        store.record_audit(
+            job_id,
+            body.operator_name,
+            "MANUAL_RETRY_CONFIRMED",
+            f"原始运单号和 Spooler 状态已核对；备注：{body.operator_note}",
+        )
         job = store.transition(
             job["id"],
             "UNKNOWN",
-            "人工确认后重新提交；沿用原运单号，不重新取号",
+            "人工核验通过后重新提交；沿用原运单号，不重新取号",
         )
+    else:
+        store.record_audit(job_id, "local-operator", "FAILED_RETRY", "失败任务重试")
     return _execute(job, simulate_result)
 
 
@@ -180,7 +236,28 @@ def confirm_printed(job_id: str) -> dict:
         raise HTTPException(404, "打印任务不存在")
     if job["status"] not in {"ACKNOWLEDGED", "UNKNOWN"}:
         raise HTTPException(409, "仅已接收或状态未知的任务可人工确认出纸")
+    store.record_audit(job_id, "local-operator", "MANUAL_PRINT_CONFIRMED", "操作员确认纸张已输出")
     return store.transition(job_id, "PRINTED", "操作员人工确认纸张已输出")
+
+
+@app.get("/api/v1/jobs/{job_id}/verification", dependencies=[Depends(authorize)])
+def verification(job_id: str) -> dict:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, "打印任务不存在")
+    return {
+        "job_id": job["id"],
+        "job_type": job["job_type"],
+        "status": job["status"],
+        "printer_name": job["printer_name"],
+        "erp_order_no": job["payload"].get("erp_order_no"),
+        "package_id": job["payload"].get("package_id"),
+        "waybill_no": job["waybill_no"],
+        "system_job_id": job["system_job_id"],
+        "output_file": job["output_file"],
+        "spooler_status": _spooler_status_for_job(job),
+        "attempts": store.list_attempts(job_id),
+    }
 
 
 @app.get("/api/v1/jobs/{job_id}/spooler-status", dependencies=[Depends(authorize)])

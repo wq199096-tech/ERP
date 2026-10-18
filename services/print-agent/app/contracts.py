@@ -9,6 +9,7 @@ class PrintItem(BaseModel):
     specification: str = Field(default="", max_length=120)
     quantity: int = Field(gt=0, le=1000000)
     barcode: str = Field(default="", max_length=80)
+    copies: int = Field(default=1, ge=1, le=10000)
 
 
 class PrintPayload(BaseModel):

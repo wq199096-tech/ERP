@@ -18,7 +18,7 @@ from ..adapters.base import UnifiedItem, UnifiedOrder
 from ..bootstrap import ensure_development_data
 from ..config import get_settings
 from ..database import get_db
-from ..models import Order, OrderItem, OrderPrivateData, PrintJob, Shop
+from ..models import Order, OrderItem, OrderPrivateData, PrintAttempt, PrintJob, Shop
 from ..privacy import decrypt_private, encrypt_private, mask_address, mask_name, mask_phone
 from ..security import Principal, require_permission
 
@@ -37,6 +37,7 @@ class PrintPrepareRequest(BaseModel):
     ] = Field(default=["WAYBILL"], min_length=1, max_length=5)
     printer_name: str = Field(min_length=1, max_length=255)
     operation: Literal["NORMAL", "REPRINT"] = "NORMAL"
+    label_copies: int = Field(default=1, ge=1, le=10000)
 
 
 class PrintReceiptRequest(BaseModel):
@@ -367,6 +368,7 @@ def prepare_print_jobs(
                             "specification": item.specification,
                             "quantity": item.quantity,
                             "barcode": item.barcode,
+                            "copies": payload.label_copies,
                         }
                         for item in order.items
                     ],
@@ -426,6 +428,17 @@ def print_receipt(
     task.system_job_id = payload.system_job_id or task.system_job_id
     task.output_file = payload.output_file or task.output_file
     task.error_message = payload.error_message
+    db.add(
+        PrintAttempt(
+            tenant_id=task.tenant_id,
+            print_job_id=task.id,
+            status=payload.status,
+            message=(
+                f"Agent {payload.agent_job_id} 回执；操作者 {principal.user_id}"
+                + (f"；{payload.error_message}" if payload.error_message else "")
+            ),
+        )
+    )
     order = db.get(Order, task.order_id)
     if order:
         statuses = set(

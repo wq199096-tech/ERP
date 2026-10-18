@@ -1,8 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import zxingcpp
 from fastapi.testclient import TestClient
+from PIL import Image
 from pypdf import PdfReader
+from pypdfium2 import PdfDocument
 
 from app import printers as printer_driver
 from app.main import app, settings, store
@@ -330,12 +334,37 @@ def test_unknown_job_requires_manual_resubmit() -> None:
         },
     ).json()
     blocked = client.post(f"/api/v1/jobs/{job['id']}/retry", headers=HEADERS)
-    assert blocked.status_code == 409
+    assert blocked.status_code == 422
+    wrong = client.post(
+        f"/api/v1/jobs/{job['id']}/retry",
+        headers=HEADERS,
+        json={
+            "confirmed_waybill_no": "WRONG-WAYBILL",
+            "confirmed_spooler_status": "NO_SPOOLER",
+            "operator_note": "没有核对就重试",
+        },
+    )
+    assert wrong.status_code == 409
     retried = client.post(
-        f"/api/v1/jobs/{job['id']}/retry?allow_unknown_resubmit=true", headers=HEADERS
+        f"/api/v1/jobs/{job['id']}/retry",
+        headers=HEADERS,
+        json={
+            "confirmed_waybill_no": job["waybill_no"],
+            "confirmed_spooler_status": "NO_SPOOLER",
+            "operator_name": "验收员",
+            "operator_note": "已核对原任务、原运单号和状态",
+        },
     ).json()
     assert retried["status"] == "ACKNOWLEDGED"
     assert retried["waybill_no"] == job["waybill_no"]
+    with store.connect() as db:
+        audit = db.execute(
+            "SELECT actor, action, detail FROM print_audits WHERE job_id = ?",
+            (job["id"],),
+        ).fetchone()
+    assert audit is not None
+    assert audit["action"] == "MANUAL_RETRY_CONFIRMED"
+    assert audit["actor"] == "验收员"
 
 
 def test_printer_state_detection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,3 +413,312 @@ def test_1000_jobs_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     jobs = second_store.list(1000)
     assert len(jobs) == 1000
     assert all(job["status"] == "UNKNOWN" for job in jobs)
+
+
+def test_waybill_renders_long_text_special_characters_and_quantity() -> None:
+    payload = print_payload(
+        "SO-LONG-TEXT-001",
+        receiver_name="ÖÜ 测试 / Receiver & Co.",
+        receiver_address=(
+            "浙江省杭州市滨江区特别长的测试地址（含特殊字符 & < > \" ' %）"
+            "Building 12345, Floor 67, Room 8901, Landmark Street, Additional Address Line"
+        ),
+        remark="易碎品（请勿倒置）& 保温层 ▲ 分拣",
+        items=[
+            {
+                "internal_sku": "SKU-LONG-NAME-0001",
+                "product_name": "304 不锈钢保温杯 · 超长商品名称测试版本（曜石黑 / 450ML）",
+                "specification": "曜石黑 / 450ML / 礼盒装",
+                "quantity": 999999,
+                "barcode": "6970000010011",
+                "copies": 1,
+            }
+        ],
+    )
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "long-text-waybill-001",
+            "job_type": "WAYBILL",
+            "payload": payload,
+        },
+    ).json()
+    text = PdfReader(job["output_file"]).pages[0].extract_text()
+    assert "SO-LONG-TEXT-001" in text
+    assert "SKU-LONG-NAME-0001" in text
+    assert "999999" in text
+
+
+def test_manifest_pages_instead_of_dropping_items() -> None:
+    items = [
+        {
+            "internal_sku": f"SKU-PAGE-{index:03d}",
+            "product_name": f"VERY-LONG-PRODUCT-NAME-{index:03d}-FOR-PAGINATION",
+            "specification": f"SPEC-{index:03d} / LONG-VALUE",
+            "quantity": 1000 + index,
+            "barcode": "6970000010011",
+            "copies": 1,
+        }
+        for index in range(40)
+    ]
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "manifest-pagination-001",
+            "job_type": "MANIFEST_A5",
+            "payload": print_payload("SO-MANIFEST-PAGES", items=items),
+        },
+    ).json()
+    pages = PdfReader(job["output_file"]).pages
+    assert len(pages) > 1
+    text = "\n".join(page.extract_text() for page in pages)
+    for index in range(40):
+        assert f"SKU-PAGE-{index:03d}" in text
+    assert "SO-MANIFEST-PAGES" in text
+
+
+def test_product_label_uses_specified_copies_per_sku() -> None:
+    payload = print_payload(
+        "SO-LABEL-COPIES",
+        items=[
+            {
+                "internal_sku": "SKU-COPY-001",
+                "product_name": "CUP-COPY-A",
+                "specification": "BLACK",
+                "quantity": 2,
+                "barcode": "6970000010011",
+                "copies": 3,
+            }
+        ],
+    )
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "label-copies-001",
+            "job_type": "PRODUCT_LABEL",
+            "payload": payload,
+        },
+    ).json()
+    pages = PdfReader(job["output_file"]).pages
+    assert len(pages) == 3
+    assert all("SKU-COPY-001" in page.extract_text() for page in pages)
+
+
+def test_waybill_barcode_is_scannable() -> None:
+    payload = print_payload("SO-BARCODE-SCAN")
+    job = client.post(
+        "/api/v1/jobs",
+        headers=HEADERS,
+        json={
+            "idempotency_key": "barcode-scannability-001",
+            "job_type": "WAYBILL",
+            "payload": payload,
+        },
+    ).json()
+    document = PdfDocument(job["output_file"])
+    bitmap = document[0].render(scale=300 / 72)
+    results = zxingcpp.read_barcodes(bitmap.to_pil().convert("RGB"))
+    assert any(
+        result.text == job["waybill_no"]
+        and result.format == zxingcpp.BarcodeFormat.Code128
+        for result in results
+    )
+
+
+class FakeDevMode:
+    Size = 100
+
+    def __init__(self, driver_extra: int = 0) -> None:
+        self.driver_extra = driver_extra
+        self.fields = 0
+        self.paper_size = 0
+        self.paper_width = 0
+        self.paper_length = 0
+        self.orientation = 0
+
+    @property
+    def Fields(self) -> int:
+        return self.fields
+
+    @Fields.setter
+    def Fields(self, value: int) -> None:
+        self.fields = value
+
+    @property
+    def PaperSize(self) -> int:
+        return self.paper_size
+
+    @PaperSize.setter
+    def PaperSize(self, value: int) -> None:
+        self.paper_size = value
+
+    @property
+    def PaperWidth(self) -> int:
+        return self.paper_width
+
+    @PaperWidth.setter
+    def PaperWidth(self, value: int) -> None:
+        self.paper_width = value
+
+    @property
+    def PaperLength(self) -> int:
+        return self.paper_length
+
+    @PaperLength.setter
+    def PaperLength(self, value: int) -> None:
+        self.paper_length = value
+
+    @property
+    def Orientation(self) -> int:
+        return self.orientation
+
+    @Orientation.setter
+    def Orientation(self, value: int) -> None:
+        self.orientation = value
+
+
+class FakeDeviceContext:
+    def __init__(self, fake: "FakeGDI") -> None:
+        self.fake = fake
+        self.pages = 0
+
+    def GetHandleOutput(self) -> int:
+        return 4321
+
+    def GetDeviceCaps(self, capability: int) -> int:
+        return 1181 if capability == 8 else 1772
+
+    def StartPage(self) -> None:
+        self.pages += 1
+
+    def EndPage(self) -> None:
+        self.fake.end_pages += 1
+
+    def EndDoc(self) -> None:
+        self.fake.end_docs += 1
+
+    def DeleteDC(self) -> None:
+        self.fake.deleted_contexts += 1
+
+
+class FakeDib:
+    def __init__(self, fake: "FakeGDI", image: Image.Image) -> None:
+        self.fake = fake
+        self.image = image
+
+    def draw(self, handle: int, rect: tuple[int, int, int, int]) -> None:
+        self.fake.draws.append((handle, self.image, rect))
+
+
+class FakeGDI:
+    def __init__(self) -> None:
+        self.create_calls = []
+        self.start_docs = []
+        self.draws = []
+        self.end_pages = 0
+        self.end_docs = 0
+        self.deleted_contexts = 0
+        self.closed_printers = 0
+        self.pywintypes = SimpleNamespace(DEVMODEType=FakeDevMode)
+        self.win32con = SimpleNamespace(
+            DM_PAPERSIZE=1,
+            DM_PAPERWIDTH=2,
+            DM_PAPERLENGTH=4,
+            DM_ORIENTATION=8,
+            DMPAPER_USER=256,
+            DMORIENT_PORTRAIT=1,
+            DM_IN_BUFFER=2,
+            DM_OUT_BUFFER=4,
+            HORZRES=8,
+            VERTRES=10,
+        )
+        self.win32gui = SimpleNamespace(CreateDC=self.create_dc)
+        self.win32print = SimpleNamespace(
+            OpenPrinter=lambda name: 99,
+            GetPrinter=lambda handle, level: {"pPrintProcessor": "WINSPOOL"},
+            DocumentProperties=self.document_properties,
+            StartDoc=self.start_doc,
+            ClosePrinter=lambda handle: None,
+        )
+        self.win32ui = SimpleNamespace(
+            CreateDCFromHandle=lambda handle: FakeDeviceContext(self)
+        )
+        self.Dib = lambda image: FakeDib(self, image)
+
+    def create_dc(self, driver: str, device: str, devmode: FakeDevMode) -> int:
+        self.create_calls.append((driver, device, devmode))
+        return 1234
+
+    def document_properties(self, *_args, **_kwargs) -> int:
+        return 120
+
+    def start_doc(self, handle: int, document: tuple[str, None, None, int]) -> int:
+        self.start_docs.append(document)
+        return 4242
+
+
+@pytest.mark.parametrize(
+    ("label", "page_size", "expected_devmode"),
+    [
+        ("thermal-100x150", (100.0, 150.0), (1000, 1500)),
+        ("a4-210x297", (210.0, 297.0), (2100, 2970)),
+    ],
+)
+def test_gdi_thermal_and_a4_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    page_size: tuple[float, float],
+    expected_devmode: tuple[int, int],
+) -> None:
+    image = Image.new("RGB", (300, 450), "white")
+    fake = FakeGDI()
+    monkeypatch.setattr(printer_driver, "_check_printer_status", lambda name: None)
+    monkeypatch.setattr(
+        printer_driver,
+        "_render_pdf_pages",
+        lambda path, dpi=300: ([image], page_size),
+    )
+    job_id = printer_driver.submit_pdf("Mock Hardware", Path(f"{label}.pdf"), label, gdi=fake)
+    assert job_id == "4242"
+    driver, device, devmode = fake.create_calls[0]
+    assert driver == "WINSPOOL"
+    assert device == "Mock Hardware"
+    assert (devmode.PaperWidth, devmode.PaperLength) == expected_devmode
+    assert devmode.Orientation == fake.win32con.DMORIENT_PORTRAIT
+    assert fake.start_docs[0][0] == label
+    assert fake.end_pages == 1
+    assert fake.end_docs == 1
+    assert len(fake.draws) == 1
+    expected_rect = printer_driver._fit_rect(image.width, image.height, 1181, 1772)
+    assert fake.draws[0][2] == expected_rect
+
+
+def test_1000_job_crash_recovery_distinguishes_submitted_and_unsubmitted(tmp_path: Path) -> None:
+    path = tmp_path / "crash-1000.sqlite3"
+    first_store = PrintStore(path)
+    for index in range(1000):
+        job = first_store.create(
+            idempotency_key=f"crash-recovery-{index:04d}",
+            job_type="WAYBILL",
+            printer_name="MockPrinter 智单测试打印机",
+            payload={"erp_order_no": f"SO-{index:04d}", "items": []},
+            waybill_no=f"TEST-{index:04d}-WAYBILL",
+        )
+        first_store.transition(job["id"], "RENDERED" if index % 2 else "QUEUED")
+        if index % 2:
+            first_store.transition(
+                job["id"], "SUBMITTED", "Mock Spooler 已接收", system_job_id=str(index + 1000)
+            )
+    recovered = PrintStore(path)
+    assert recovered.recover_interrupted() == 1000
+    failed = recovered.list_by_status("FAILED", 1000)
+    unknown = recovered.list_by_status("UNKNOWN", 1000)
+    assert len(failed) == 500
+    assert len(unknown) == 500
+    waybills = [job["waybill_no"] for job in failed + unknown]
+    assert len(waybills) == len(set(waybills)) == 1000
+    assert all("尚未提交" in job["error_message"] for job in failed)
+    assert all("可能已提交" in job["error_message"] for job in unknown)

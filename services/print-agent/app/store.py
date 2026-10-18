@@ -50,6 +50,15 @@ class PrintStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS print_audits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES print_jobs(id)
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(print_jobs)")}
@@ -58,23 +67,40 @@ class PrintStore:
 
     def recover_interrupted(self) -> int:
         now = datetime.now(UTC).isoformat()
-        message = "Agent 重启时任务未处于终态，需要人工核验后重试"
+        submitted_message = "Agent 重启时任务可能已提交，必须人工核验后重试"
+        unsubmitted_message = "Agent 重启时任务尚未提交，可安全重试"
+        retained_message = "Agent 重启后继续保持状态未知，等待人工核验"
+        changed = 0
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id FROM print_jobs WHERE status IN ('CREATED', 'QUEUED', 'SUBMITTED')"
+                """SELECT id, status, system_job_id FROM print_jobs
+                WHERE status IN ('CREATED', 'QUEUED', 'RENDERED', 'SUBMITTED', 'UNKNOWN')"""
             ).fetchall()
             for row in rows:
-                db.execute(
-                    "UPDATE print_jobs SET status = 'UNKNOWN', error_message = ?, updated_at = ? "
-                    "WHERE id = ?",
-                    (message, now, row["id"]),
-                )
-                db.execute(
-                    "INSERT INTO print_attempts "
-                    "(job_id, status, message, created_at) VALUES (?, 'UNKNOWN', ?, ?)",
-                    (row["id"], message, now),
-                )
-        return len(rows)
+                status = row["status"]
+                if status == "UNKNOWN":
+                    new_status = "UNKNOWN"
+                    message = retained_message
+                elif row["system_job_id"] or status == "SUBMITTED":
+                    new_status = "UNKNOWN"
+                    message = submitted_message
+                else:
+                    new_status = "FAILED"
+                    message = unsubmitted_message
+                if status != new_status or status == "UNKNOWN":
+                    db.execute(
+                        "UPDATE print_jobs SET status = ?, error_message = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (new_status, message, now, row["id"]),
+                    )
+                    db.execute(
+                        "INSERT INTO print_attempts "
+                        "(job_id, status, message, created_at) VALUES (?, ?, ?, ?)",
+                        (row["id"], new_status, message, now),
+                    )
+                if status != new_status:
+                    changed += 1
+        return changed
 
     def set_queue_paused(self, paused: bool) -> None:
         with self.connect() as db:
@@ -113,6 +139,32 @@ class PrintStore:
                 "SELECT * FROM print_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [self._dict(row) for row in rows]
+
+    def list_by_status(self, status: str, limit: int = 1000) -> "list[dict[str, Any]]":
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM print_jobs WHERE status = ? ORDER BY created_at LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
+    def record_audit(self, job_id: str, actor: str, action: str, detail: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO print_audits (job_id, actor, action, detail, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (job_id, actor, action, detail, now),
+            )
+
+    def list_attempts(self, job_id: str, limit: int = 50) -> "list[dict[str, str]]":
+        with self.connect() as db:
+            attempts = db.execute(
+                """SELECT status, message, created_at FROM print_attempts
+                WHERE job_id = ? ORDER BY id DESC LIMIT ?""",
+                (job_id, limit),
+            ).fetchall()
+        return [dict(row) for row in attempts]
 
     def create(
         self,

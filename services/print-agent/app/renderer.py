@@ -58,6 +58,17 @@ def _header(canvas: Canvas, width: float, height: float, title: str) -> None:
     canvas.drawString(6 * mm, height - 10 * mm, title)
 
 
+def _test_watermark(canvas: Canvas, width: float, height: float) -> None:
+    canvas.saveState()
+    canvas.setFillColor(HexColor("#D92D20"))
+    canvas.setFont(FONT, 22)
+    canvas.translate(width / 2, height / 2)
+    canvas.rotate(35)
+    canvas.setFillAlpha(0.14)
+    canvas.drawCentredString(0, 0, "测试样张 · 不可用于寄件")
+    canvas.restoreState()
+
+
 def render_pdf(job_type: str, payload: dict, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     size = PAGE_SIZES.get(job_type, A4)
@@ -72,12 +83,15 @@ def render_pdf(job_type: str, payload: dict, target: Path) -> Path:
         _render_manifest(canvas, width, height, payload)
     elif job_type == "PRODUCT_LABEL":
         if payload.get("label_template"):
-            _render_schema_label(canvas, width, height, payload)
-            canvas.showPage()
+            for item in _print_items(payload):
+                for _ in range(int(item.get("copies", 1))):
+                    _render_schema_label(canvas, width, height, payload | {"items": [item]})
+                    canvas.showPage()
         else:
             for item in _print_items(payload):
-                _render_label(canvas, width, height, payload | {"items": [item]})
-                canvas.showPage()
+                for _ in range(int(item.get("copies", 1))):
+                    _render_label(canvas, width, height, payload | {"items": [item]})
+                    canvas.showPage()
         canvas.save()
         return target
     else:
@@ -101,7 +115,8 @@ def _render_waybill(canvas: Canvas, width: float, height: float, payload: dict) 
     canvas.setFont(FONT, 10)
     items = _print_items(payload)
     item_lines = [
-        f"{item['product_name']} / {item['internal_sku']} × {item['quantity']}"
+        f"{item['product_name']} / {item['internal_sku']} / "
+        f"{item['specification'] or '无规格'} × {item['quantity']}"
         for item in items
     ]
     item_lines[0] = f"商品（共 {len(items)} 项）：{item_lines[0]}"
@@ -118,50 +133,72 @@ def _render_waybill(canvas: Canvas, width: float, height: float, payload: dict) 
     if payload.get("remark"):
         lines.append(f"备注：{payload['remark']}")
     lines.append("说明：测试样张，无真实物流效力。")
-    y = height - 25 * mm
-    for line in lines:
-        for text in _wrapped_text(line, FONT, 10, width - 12 * mm):
-            canvas.drawString(6 * mm, y, text)
-            y -= 7 * mm
-        y -= 2 * mm
-    if y < 38 * mm:
+    layout: list[tuple[str, float]] = []
+    for font_size, line_height in ((10, 7), (9, 6.3), (8, 5.6), (7, 5.0), (6, 4.4)):
+        layout = []
+        y = height - 25 * mm
+        for line in lines:
+            for text in _wrapped_text(line, FONT, font_size, width - 12 * mm):
+                layout.append((text, y))
+                y -= line_height
+            y -= 1.5
+        if y >= 38 * mm:
+            canvas.setFont(FONT, font_size)
+            for text, text_y in layout:
+                canvas.drawString(6 * mm, text_y, text)
+            break
+    if not layout:
         raise ValueError("电子面单内容超出纸张边界")
     barcode = code128.Code128(payload.get("waybill_no", "TEST0000000001"), barHeight=20 * mm)
     barcode.drawOn(canvas, 8 * mm, 18 * mm)
 
 
 def _render_manifest(canvas: Canvas, width: float, height: float, payload: dict) -> None:
-    _header(canvas, width, height, "智单 ERP 发货清单")
-    canvas.setFillColorRGB(0, 0, 0)
-    canvas.setFont(FONT, 10)
-    y = height - 24 * mm
-    rows = [
-        ("店铺", payload.get("shop_name", "演示店铺")),
-        ("ERP 订单号", payload.get("erp_order_no", payload.get("order_no", "SO-DEMO-001"))),
-        ("仓库", payload.get("warehouse_name", "杭州一号仓")),
-    ]
-    for label, value in rows:
-        canvas.setFillColor(HexColor("#667085"))
-        canvas.drawString(8 * mm, y, f"{label}：")
-        canvas.setFillColorRGB(0, 0, 0)
-        for text in _wrapped_text(str(value), FONT, 10, width - 40 * mm):
-            canvas.drawString(30 * mm, y, text)
-            y -= 7 * mm
-        canvas.line(8 * mm, y - 3 * mm, width - 8 * mm, y - 3 * mm)
-        y -= 10 * mm
     items = _print_items(payload)
-    canvas.setFillColor(HexColor("#155EEF"))
-    canvas.drawString(8 * mm, y, f"商品明细（共 {len(items)} 项）")
-    y -= 7 * mm
+    page_number = 0
+
+    def start_page(is_first: bool) -> float:
+        nonlocal page_number
+        page_number += 1
+        _header(canvas, width, height, "智单 ERP 发货清单")
+        _test_watermark(canvas, width, height)
+        y = height - 24 * mm
+        rows = [("ERP 订单号", payload.get("erp_order_no", payload.get("order_no", "SO-DEMO-001")))]
+        if is_first:
+            rows.insert(0, ("店铺", payload.get("shop_name", "演示店铺")))
+        rows.append(("仓库", payload.get("warehouse_name", "杭州一号仓")))
+        if page_number > 1:
+            rows.insert(0, ("页码", f"第 {page_number} 页 · 续页"))
+        canvas.setFillColorRGB(0, 0, 0)
+        canvas.setFont(FONT, 10)
+        for label, value in rows:
+            canvas.setFillColor(HexColor("#667085"))
+            canvas.drawString(8 * mm, y, f"{label}：")
+            canvas.setFillColorRGB(0, 0, 0)
+            for text in _wrapped_text(str(value), FONT, 10, width - 40 * mm):
+                canvas.drawString(30 * mm, y, text)
+                y -= 7 * mm
+            canvas.line(8 * mm, y - 3 * mm, width - 8 * mm, y - 3 * mm)
+            y -= 10 * mm
+        if is_first:
+            canvas.setFillColor(HexColor("#155EEF"))
+            canvas.drawString(8 * mm, y, f"商品明细（共 {len(items)} 项）")
+            y -= 7 * mm
+        return y
+
+    y = start_page(True)
     for item in items:
         value = (
             f"{item['product_name']} | SKU {item['internal_sku']} | "
             f"{item['specification'] or '无规格'} | 数量 {item['quantity']}"
         )
-        canvas.setFillColor(HexColor("#667085"))
-        canvas.drawString(8 * mm, y, "商品：")
-        canvas.setFillColorRGB(0, 0, 0)
         for text in _wrapped_text(value, FONT, 9, width - 40 * mm):
+            if y - 6 * mm < 14 * mm:
+                canvas.showPage()
+                y = start_page(False)
+            canvas.setFillColor(HexColor("#667085"))
+            canvas.drawString(8 * mm, y, "商品：")
+            canvas.setFillColorRGB(0, 0, 0)
             canvas.drawString(30 * mm, y, text)
             y -= 6 * mm
         canvas.line(8 * mm, y - 2 * mm, width - 8 * mm, y - 2 * mm)
@@ -171,11 +208,18 @@ def _render_manifest(canvas: Canvas, width: float, height: float, payload: dict)
         canvas.drawString(8 * mm, y, "打包备注：")
         canvas.setFillColorRGB(0, 0, 0)
         for text in _wrapped_text(payload["remark"], FONT, 9, width - 40 * mm):
+            if y - 6 * mm < 14 * mm:
+                canvas.showPage()
+                y = start_page(False)
+                canvas.setFillColor(HexColor("#667085"))
+                canvas.drawString(8 * mm, y, "打包备注（续）：")
+                canvas.setFillColorRGB(0, 0, 0)
             canvas.drawString(30 * mm, y, text)
             y -= 6 * mm
         y -= 4 * mm
-    if y < 10 * mm:
-        raise ValueError("发货清单内容超出纸张边界")
+    canvas.setFillColor(HexColor("#667085"))
+    canvas.setFont(FONT, 8)
+    canvas.drawString(8 * mm, 8 * mm, f"第 {page_number} 页 · 测试样张")
 
 
 def _render_label(canvas: Canvas, width: float, height: float, payload: dict) -> None:
@@ -185,6 +229,7 @@ def _render_label(canvas: Canvas, width: float, height: float, payload: dict) ->
     items = _print_items(payload)
     canvas.setLineWidth(0.5)
     canvas.rect(2 * mm, 2 * mm, width - 4 * mm, height - 4 * mm)
+    _test_watermark(canvas, width, height)
     y = height - 8 * mm
     for item in items:
         canvas.setFont(FONT, 9)
@@ -226,6 +271,7 @@ def _render_schema_label(canvas: Canvas, width: float, height: float, payload: d
     }
     canvas.setLineWidth(0.4)
     canvas.rect(0.5 * mm, 0.5 * mm, width - mm, height - mm)
+    _test_watermark(canvas, width, height)
     for element in template["elements"]:
         kind = element["kind"]
         x = float(element["x_mm"]) * mm
