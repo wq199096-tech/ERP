@@ -3,7 +3,9 @@ const path = require('node:path');
 
 const API_URL = process.env.SMARTORDER_API_URL || 'http://127.0.0.1:8000/api/v1';
 const AGENT_URL = process.env.SMARTORDER_PRINT_AGENT_URL || 'http://127.0.0.1:17321/api/v1';
-const AGENT_TOKEN = process.env.PRINT_AGENT_TOKEN || 'replace-with-local-agent-token';
+const AGENT_TOKEN = process.env.PRINT_AGENT_TOKEN || process.env.SMARTORDER_PRINT_AGENT_TOKEN || '';
+const PRINT_AGENT_TOKEN_ERROR =
+  '未配置本机打印服务令牌。请使用 PRINT_AGENT_TOKEN 或 SMARTORDER_PRINT_AGENT_TOKEN 启动客户端。';
 
 const apiPaths = [
   /^\/auth\/login$/,
@@ -21,6 +23,17 @@ const agentPaths = [
 
 function allowed(pathname, patterns) {
   return typeof pathname === 'string' && patterns.some((pattern) => pattern.test(pathname));
+}
+
+function withTestPrinterSelection(request) {
+  if (process.env.SMARTORDER_FORCE_MOCK_PRINTER !== 'true') return request;
+  if (request.path !== '/jobs' || request.method !== 'POST') return request;
+  const body = request.body;
+  if (body) {
+    body.printer_name = 'MockPrinter 智单测试打印机';
+    if (body.payload && body.payload.printer_name) body.payload.printer_name = body.printer_name;
+  }
+  return request;
 }
 
 async function proxyRequest(baseUrl, request, patterns, serviceToken) {
@@ -52,7 +65,9 @@ async function proxyRequest(baseUrl, request, patterns, serviceToken) {
 ipcMain.handle('smartorder:api', (_event, request) =>
   proxyRequest(API_URL, request, apiPaths));
 ipcMain.handle('smartorder:print', (_event, request) =>
-  proxyRequest(AGENT_URL, request, agentPaths, AGENT_TOKEN));
+  AGENT_TOKEN
+    ? proxyRequest(AGENT_URL, withTestPrinterSelection(request), agentPaths, AGENT_TOKEN)
+    : Promise.reject(new Error(PRINT_AGENT_TOKEN_ERROR)));
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -80,6 +95,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (app.isPackaged && !AGENT_TOKEN) {
+    const { dialog } = require('electron');
+    dialog.showErrorBox('智单 ERP 未完全可用', PRINT_AGENT_TOKEN_ERROR);
+  }
   createWindow();
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });

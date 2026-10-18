@@ -8,6 +8,7 @@ test('packaged Electron uses secure IPC for API and Print Agent', async () => {
       ...process.env,
       SMARTORDER_API_URL: 'http://127.0.0.1:8000/api/v1',
       SMARTORDER_PRINT_AGENT_URL: 'http://127.0.0.1:17321/api/v1',
+      SMARTORDER_FORCE_MOCK_PRINTER: 'true',
       PRINT_AGENT_TOKEN: 'replace-with-local-agent-token',
     },
   });

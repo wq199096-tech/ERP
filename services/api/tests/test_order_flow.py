@@ -98,12 +98,28 @@ def test_print_pipeline_blocks_then_creates_idempotent_real_order_tasks() -> Non
         task["id"] for task in second.json()["tasks"]
     ]
     task = first.json()["tasks"][0]
+    assert task["payload"]["data_source"] == "SERVER_ORDER"
+    assert task["payload"]["erp_order_no"]
+    assert task["payload"]["order_version"] >= 1
+    assert task["payload"]["package_id"]
+    assert task["payload"]["warehouse_name"]
+    assert task["payload"]["items"]
+    item = task["payload"]["items"][0]
+    assert item["internal_sku"]
+    assert item["product_name"]
+    assert item["quantity"] >= 1
     receipt = client.post(
         f"/api/v1/orders/print/tasks/{task['id']}/receipt",
         headers=headers,
         json={"agent_job_id": "agent-1", "status": "FAILED", "error_message": "模拟失败"},
     )
     assert receipt.json()["order_print_status"] == "FAILED"
+    blocked_receipt = client.post(
+        f"/api/v1/orders/print/tasks/{task['id']}/receipt",
+        headers=headers,
+        json={"agent_job_id": "agent-2", "status": "PRINTED"},
+    )
+    assert blocked_receipt.status_code == 409
 
 
 def test_viewer_cannot_audit_or_print() -> None:

@@ -129,23 +129,27 @@ class PrintStore:
         job_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         with self.connect() as db:
-            db.execute(
-                """INSERT INTO print_jobs
-                (id, idempotency_key, job_type, printer_name, status, payload,
-                 waybill_no, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?, ?)""",
-                (
-                    job_id,
-                    idempotency_key,
-                    job_type,
-                    printer_name,
-                    json.dumps(payload, ensure_ascii=False),
-                    waybill_no,
-                    now,
-                    now,
-                ),
-            )
-        return self.get(job_id)
+            try:
+                db.execute(
+                    """INSERT INTO print_jobs
+                    (id, idempotency_key, job_type, printer_name, status, payload,
+                     waybill_no, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?, ?)""",
+                    (
+                        job_id,
+                        idempotency_key,
+                        job_type,
+                        printer_name,
+                        json.dumps(payload, ensure_ascii=False),
+                        waybill_no,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                pass
+        existing = self.get_by_key(idempotency_key)
+        return existing if existing else self.get(job_id)
 
     def transition(
         self,

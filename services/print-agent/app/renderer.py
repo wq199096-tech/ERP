@@ -23,6 +23,33 @@ PAGE_SIZES = {
 }
 
 
+def _print_items(payload: dict) -> list[dict]:
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("打印载荷缺少商品列表")
+    return items
+
+
+def _wrapped_text(text: str, font: str, font_size: int, max_width: float) -> list[str]:
+    text = str(text)
+    if not text:
+        return [""]
+    result: list[str] = []
+    current = ""
+    for character in text:
+        trial = current + character
+        if pdfmetrics.stringWidth(trial, font, font_size) <= max_width:
+            current = trial
+        elif not current:
+            result.append(character)
+        else:
+            result.append(current)
+            current = character
+    if current:
+        result.append(current)
+    return result
+
+
 def _header(canvas: Canvas, width: float, height: float, title: str) -> None:
     canvas.setFillColor(HexColor("#155EEF"))
     canvas.rect(0, height - 15 * mm, width, 15 * mm, fill=1, stroke=0)
@@ -44,7 +71,15 @@ def render_pdf(job_type: str, payload: dict, target: Path) -> Path:
     elif job_type.startswith("MANIFEST"):
         _render_manifest(canvas, width, height, payload)
     elif job_type == "PRODUCT_LABEL":
-        _render_label(canvas, width, height, payload)
+        if payload.get("label_template"):
+            _render_schema_label(canvas, width, height, payload)
+            canvas.showPage()
+        else:
+            for item in _print_items(payload):
+                _render_label(canvas, width, height, payload | {"items": [item]})
+                canvas.showPage()
+        canvas.save()
+        return target
     else:
         raise ValueError(f"不支持的任务类型: {job_type}")
     canvas.showPage()
@@ -64,21 +99,33 @@ def _render_waybill(canvas: Canvas, width: float, height: float, payload: dict) 
     canvas.restoreState()
     canvas.setFillColorRGB(0, 0, 0)
     canvas.setFont(FONT, 10)
+    items = _print_items(payload)
+    item_lines = [
+        f"{item['product_name']} / {item['internal_sku']} × {item['quantity']}"
+        for item in items
+    ]
+    item_lines[0] = f"商品（共 {len(items)} 项）：{item_lines[0]}"
     lines = [
         f"测试运单号：{payload.get('waybill_no', 'TEST-PENDING')}",
-        f"订单号：{payload.get('order_no', 'SO-DEMO-001')}",
-        (
-            f"收件人：{payload.get('receiver_name', '测试客户')}  "
-            f"{payload.get('phone', '138****0000')}"
-        ),
-        f"地址：{payload.get('address', '浙江省杭州市测试地址***')}",
-        f"商品：{payload.get('product_name', '演示商品')} × {payload.get('quantity', 1)}",
-        "说明：此数据由 MockPlatformAdapter 生成，无真实物流效力。",
+        f"ERP 订单号：{payload.get('erp_order_no', payload.get('order_no', 'SO-DEMO-001'))}",
+        f"收件人：{payload.get('receiver_name', '测试客户')} "
+        f"{payload.get('receiver_phone', '138****0000')}",
+        "地址："
+        f"{payload.get('receiver_address', payload.get('address', '浙江省杭州市测试地址***'))}",
+        f"仓库：{payload.get('warehouse_name', '演示仓库')}",
+        *item_lines,
     ]
+    if payload.get("remark"):
+        lines.append(f"备注：{payload['remark']}")
+    lines.append("说明：测试样张，无真实物流效力。")
     y = height - 25 * mm
     for line in lines:
-        canvas.drawString(6 * mm, y, line[:42])
-        y -= 9 * mm
+        for text in _wrapped_text(line, FONT, 10, width - 12 * mm):
+            canvas.drawString(6 * mm, y, text)
+            y -= 7 * mm
+        y -= 2 * mm
+    if y < 38 * mm:
+        raise ValueError("电子面单内容超出纸张边界")
     barcode = code128.Code128(payload.get("waybill_no", "TEST0000000001"), barHeight=20 * mm)
     barcode.drawOn(canvas, 8 * mm, 18 * mm)
 
@@ -90,38 +137,74 @@ def _render_manifest(canvas: Canvas, width: float, height: float, payload: dict)
     y = height - 24 * mm
     rows = [
         ("店铺", payload.get("shop_name", "演示店铺")),
-        ("订单号", payload.get("order_no", "SO-DEMO-001")),
-        ("仓库", payload.get("warehouse", "杭州一号仓")),
-        ("商品", payload.get("product_name", "304 不锈钢保温杯")),
-        ("SKU", payload.get("sku", "SO-CUP-450")),
-        ("规格", payload.get("specification", "曜石黑 / 450ml")),
-        ("数量", str(payload.get("quantity", 1))),
-        ("货位", payload.get("location", "A-01-03")),
-        ("打包备注", payload.get("remark", "核对颜色后装箱")),
+        ("ERP 订单号", payload.get("erp_order_no", payload.get("order_no", "SO-DEMO-001"))),
+        ("仓库", payload.get("warehouse_name", "杭州一号仓")),
     ]
     for label, value in rows:
         canvas.setFillColor(HexColor("#667085"))
         canvas.drawString(8 * mm, y, f"{label}：")
         canvas.setFillColorRGB(0, 0, 0)
-        canvas.drawString(30 * mm, y, str(value)[:70])
+        for text in _wrapped_text(str(value), FONT, 10, width - 40 * mm):
+            canvas.drawString(30 * mm, y, text)
+            y -= 7 * mm
         canvas.line(8 * mm, y - 3 * mm, width - 8 * mm, y - 3 * mm)
         y -= 10 * mm
+    items = _print_items(payload)
+    canvas.setFillColor(HexColor("#155EEF"))
+    canvas.drawString(8 * mm, y, f"商品明细（共 {len(items)} 项）")
+    y -= 7 * mm
+    for item in items:
+        value = (
+            f"{item['product_name']} | SKU {item['internal_sku']} | "
+            f"{item['specification'] or '无规格'} | 数量 {item['quantity']}"
+        )
+        canvas.setFillColor(HexColor("#667085"))
+        canvas.drawString(8 * mm, y, "商品：")
+        canvas.setFillColorRGB(0, 0, 0)
+        for text in _wrapped_text(value, FONT, 9, width - 40 * mm):
+            canvas.drawString(30 * mm, y, text)
+            y -= 6 * mm
+        canvas.line(8 * mm, y - 2 * mm, width - 8 * mm, y - 2 * mm)
+        y -= 8 * mm
+    if payload.get("remark"):
+        canvas.setFillColor(HexColor("#667085"))
+        canvas.drawString(8 * mm, y, "打包备注：")
+        canvas.setFillColorRGB(0, 0, 0)
+        for text in _wrapped_text(payload["remark"], FONT, 9, width - 40 * mm):
+            canvas.drawString(30 * mm, y, text)
+            y -= 6 * mm
+        y -= 4 * mm
+    if y < 10 * mm:
+        raise ValueError("发货清单内容超出纸张边界")
 
 
 def _render_label(canvas: Canvas, width: float, height: float, payload: dict) -> None:
     if payload.get("label_template"):
         _render_schema_label(canvas, width, height, payload)
         return
+    items = _print_items(payload)
     canvas.setLineWidth(0.5)
     canvas.rect(2 * mm, 2 * mm, width - 4 * mm, height - 4 * mm)
+    y = height - 8 * mm
+    for item in items:
+        canvas.setFont(FONT, 9)
+        for text in _wrapped_text(item["product_name"], FONT, 9, width - 22 * mm):
+            canvas.drawString(4 * mm, y, text)
+            y -= 5 * mm
+        canvas.setFont(FONT, 7)
+        canvas.drawString(4 * mm, y, f"SKU: {item['internal_sku']}")
+        y -= 4.5 * mm
+        for text in _wrapped_text(item["specification"] or "无规格", FONT, 7, width - 8 * mm):
+            canvas.drawString(4 * mm, y, text)
+            y -= 4.5 * mm
+        y -= mm
+    if y < 15 * mm:
+        raise ValueError("商品标签内容超出纸张边界")
     canvas.setFont(FONT, 9)
-    canvas.drawString(4 * mm, height - 8 * mm, payload.get("product_name", "演示商品")[:16])
-    canvas.setFont(FONT, 7)
-    canvas.drawString(4 * mm, height - 14 * mm, f"SKU: {payload.get('sku', 'SO-DEMO-001')}")
-    canvas.drawString(4 * mm, height - 19 * mm, payload.get("specification", "默认规格")[:24])
-    barcode = code128.Code128(payload.get("barcode", "6970000010011"), barHeight=10 * mm)
+    first_barcode = next((item["barcode"] for item in items if item["barcode"]), "6970000010011")
+    barcode = code128.Code128(first_barcode, barHeight=10 * mm)
     barcode.drawOn(canvas, 4 * mm, 4 * mm)
-    qr_image = qrcode.make(payload.get("sku", "SO-DEMO-001"))
+    qr_image = qrcode.make(items[0]["internal_sku"])
     qr_buffer = BytesIO()
     qr_image.save(qr_buffer, format="PNG")
     qr_buffer.seek(0)
@@ -130,11 +213,15 @@ def _render_label(canvas: Canvas, width: float, height: float, payload: dict) ->
 
 def _render_schema_label(canvas: Canvas, width: float, height: float, payload: dict) -> None:
     template = payload["label_template"]
+    items = _print_items(payload)
+    if len(items) > 1:
+        raise ValueError("模板商品标签一次仅支持一个商品，请为每个商品创建独立任务")
+    item = items[0]
     values = {
-        "text": payload.get("product_name", "演示商品"),
-        "sku": payload.get("sku", "SO-DEMO-001"),
-        "barcode": payload.get("barcode", "6970000010011"),
-        "qrcode": payload.get("sku", "SO-DEMO-001"),
+        "text": item["product_name"],
+        "sku": item["internal_sku"],
+        "barcode": item["barcode"] or item["internal_sku"],
+        "qrcode": item["internal_sku"],
         "price": str(payload.get("price", "¥0.00")),
     }
     canvas.setLineWidth(0.4)

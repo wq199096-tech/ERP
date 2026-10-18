@@ -12,6 +12,7 @@ test('real Electron window logs in, reads orders, sees printers and previews PDF
       SMARTORDER_RENDERER_URL: 'http://127.0.0.1:5173',
       SMARTORDER_API_URL: 'http://127.0.0.1:8000/api/v1',
       SMARTORDER_PRINT_AGENT_URL: 'http://127.0.0.1:17321/api/v1',
+      SMARTORDER_FORCE_MOCK_PRINTER: 'true',
       PRINT_AGENT_TOKEN: 'replace-with-local-agent-token',
     },
   });

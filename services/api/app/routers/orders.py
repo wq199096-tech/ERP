@@ -346,6 +346,7 @@ def prepare_print_jobs(
                 job_type=job_type,
                 printer_name=payload.printer_name,
                 payload={
+                    "data_source": "SERVER_ORDER",
                     "server_task_id": None,
                     "erp_order_no": order.erp_order_no,
                     "order_version": order.version,
@@ -357,10 +358,13 @@ def prepare_print_jobs(
                     "receiver_name": order.receiver_name,
                     "receiver_phone": order.receiver_phone_masked,
                     "receiver_address": order.receiver_address_masked,
+                    "warehouse_name": order.warehouse_name,
+                    "remark": order.remark,
                     "items": [
                         {
-                            "sku": item.internal_sku,
-                            "name": item.product_name,
+                            "internal_sku": item.internal_sku,
+                            "product_name": item.product_name,
+                            "specification": item.specification,
                             "quantity": item.quantity,
                             "barcode": item.barcode,
                         }
@@ -400,6 +404,22 @@ def print_receipt(
     )
     if not task:
         raise HTTPException(404, "打印任务不存在")
+    if task.status == "PRINTED":
+        raise HTTPException(409, "任务已完成出纸，不能重复回执")
+    if task.agent_job_id and task.agent_job_id != payload.agent_job_id:
+        raise HTTPException(409, "回执的 Agent 作业标识与任务不一致")
+    if task.waybill_no and payload.waybill_no and task.waybill_no != payload.waybill_no:
+        raise HTTPException(409, "回执运单号与任务已有运单号不一致")
+    transitions = {
+        "CREATED": {"ACKNOWLEDGED", "RENDERED", "SUBMITTED", "PRINTED", "FAILED", "UNKNOWN"},
+        "ACKNOWLEDGED": {"RENDERED", "SUBMITTED", "PRINTED", "FAILED", "UNKNOWN"},
+        "RENDERED": {"SUBMITTED", "PRINTED", "FAILED", "UNKNOWN"},
+        "SUBMITTED": {"PRINTED", "FAILED", "UNKNOWN"},
+        "FAILED": {"ACKNOWLEDGED", "RENDERED", "SUBMITTED", "PRINTED", "FAILED", "UNKNOWN"},
+        "UNKNOWN": {"ACKNOWLEDGED", "RENDERED", "SUBMITTED", "PRINTED", "FAILED", "UNKNOWN"},
+    }
+    if payload.status not in transitions.get(task.status, set()):
+        raise HTTPException(409, f"打印任务状态不允许从 {task.status} 转换到 {payload.status}")
     task.agent_job_id = payload.agent_job_id
     task.status = payload.status
     task.waybill_no = payload.waybill_no or task.waybill_no

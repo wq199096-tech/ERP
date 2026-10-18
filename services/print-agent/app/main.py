@@ -4,10 +4,11 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import get_settings
-from .printers import list_printers, submit_pdf
+from .contracts import PrintPayload
+from .printers import get_spooler_job_status, list_printers, submit_pdf
 from .renderer import render_pdf
 from .schemas import LabelTemplate
 from .store import FINAL_STATES, RETRYABLE_STATES, PrintStore
@@ -66,8 +67,11 @@ def _execute(job: dict, simulate_result: str) -> dict:
     store.transition(job["id"], "QUEUED")
     output = settings.output_path / f"{job['id']}.pdf"
     payload = job["payload"] | ({"waybill_no": job["waybill_no"]} if job["waybill_no"] else {})
-    render_pdf(job["job_type"], payload, output)
-    store.transition(job["id"], "SUBMITTED", output_file=str(output))
+    try:
+        render_pdf(job["job_type"], payload, output)
+    except Exception as exc:
+        return store.transition(job["id"], "FAILED", f"PDF 渲染失败：{exc}")
+    store.transition(job["id"], "RENDERED", "PDF 已渲染完成", output_file=str(output))
     if not job["printer_name"].startswith("MockPrinter"):
         try:
             spooler_job_id = submit_pdf(job["printer_name"], output, job["id"])
@@ -79,6 +83,8 @@ def _execute(job: dict, simulate_result: str) -> dict:
             )
         except RuntimeError as exc:
             return store.transition(job["id"], "FAILED", str(exc))
+        except Exception as exc:
+            return store.transition(job["id"], "FAILED", f"Windows 打印失败：{exc}")
     if simulate_result == "failure":
         return store.transition(job["id"], "FAILED", "MockPrinter 模拟离线")
     if simulate_result == "unknown":
@@ -95,12 +101,14 @@ def create_job(payload: JobRequest) -> dict:
     existing = store.get_by_key(payload.idempotency_key)
     if existing:
         return existing | {"deduplicated": True}
+    try:
+        print_payload = PrintPayload.model_validate(payload.payload)
+    except ValidationError as exc:
+        raise HTTPException(422, f"打印数据契约校验失败：{str(exc)}") from exc
     waybill_no = None
     if payload.job_type == "WAYBILL":
-        waybill_no = payload.payload.get("reuse_waybill_no") or (
-            f"TEST-{uuid.uuid4().hex[:16].upper()}"
-        )
-    request_payload = payload.payload
+        waybill_no = print_payload.reuse_waybill_no or f"TEST-{uuid.uuid4().hex[:16].upper()}"
+    request_payload = print_payload.model_dump()
     if payload.job_type == "PRODUCT_LABEL" and payload.label_template:
         request_payload = request_payload | {"label_template": payload.label_template.model_dump()}
     job = store.create(
@@ -134,12 +142,24 @@ def resume_queue() -> dict:
 
 
 @app.post("/api/v1/jobs/{job_id}/retry", dependencies=[Depends(authorize)])
-def retry_job(job_id: str, simulate_result: str = "success") -> dict:
+def retry_job(
+    job_id: str,
+    simulate_result: str = "success",
+    allow_unknown_resubmit: bool = False,
+) -> dict:
     job = store.get(job_id)
     if not job:
         raise HTTPException(404, "打印任务不存在")
     if job["status"] not in RETRYABLE_STATES:
         raise HTTPException(409, "仅失败或状态未知的任务允许重试")
+    if job["status"] == "UNKNOWN" and not allow_unknown_resubmit:
+        raise HTTPException(409, "状态未知必须先人工核验，确认后才能重新提交")
+    if job["status"] == "UNKNOWN" and job["system_job_id"]:
+        job = store.transition(
+            job["id"],
+            "UNKNOWN",
+            "人工确认后重新提交；沿用原运单号，不重新取号",
+        )
     return _execute(job, simulate_result)
 
 
@@ -161,6 +181,16 @@ def confirm_printed(job_id: str) -> dict:
     if job["status"] not in {"ACKNOWLEDGED", "UNKNOWN"}:
         raise HTTPException(409, "仅已接收或状态未知的任务可人工确认出纸")
     return store.transition(job_id, "PRINTED", "操作员人工确认纸张已输出")
+
+
+@app.get("/api/v1/jobs/{job_id}/spooler-status", dependencies=[Depends(authorize)])
+def spooler_status(job_id: str) -> dict:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, "打印任务不存在")
+    if not job["system_job_id"]:
+        raise HTTPException(409, "任务还没有 Spooler 作业标识")
+    return get_spooler_job_status(job["printer_name"], job["system_job_id"])
 
 
 @app.post("/api/v1/preview/{job_type}", dependencies=[Depends(authorize)])

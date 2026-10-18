@@ -94,8 +94,13 @@ export const printAgent = {
   health: () => agentRequest<{ status: string }>('/health'),
   printers: () => agentRequest<Array<{ name: string; is_default: boolean; is_online: boolean }>>('/printers'),
   jobs: () => agentRequest<PrintJob[]>('/jobs'),
+  spoolerStatus: (id: string) =>
+    agentRequest<{ status: string; message: string }>(`/jobs/${id}/spooler-status`),
   create: (body: object) => agentRequest<PrintJob>('/jobs', { method: 'POST', body }),
-  retry: (id: string) => agentRequest<PrintJob>(`/jobs/${id}/retry`, { method: 'POST' }),
+  retry: (id: string, allowUnknownResubmit = false) =>
+    agentRequest<PrintJob>(`/jobs/${id}/retry?allow_unknown_resubmit=${allowUnknownResubmit}`, {
+      method: 'POST',
+    }),
   preview: async (jobType: string, payload: object) => {
     const result = await agentRequest<{ binary: string; type: string }>(`/preview/${jobType}`, {
       method: 'POST', body: payload,

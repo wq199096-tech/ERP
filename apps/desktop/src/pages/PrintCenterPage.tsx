@@ -12,8 +12,8 @@ const TYPES = [
   { value: 'MANIFEST_A4', label: '发货清单', description: 'A4 / A5 / 80 mm 可切换', color: '#12b76a' },
   { value: 'PRODUCT_LABEL', label: '商品标签', description: '60 × 40 mm，含条形码', color: '#f79009' },
 ];
-const statusColors: Record<string, string> = { ACKNOWLEDGED: 'processing', FAILED: 'error', UNKNOWN: 'warning', CANCELLED: 'default', PRINTED: 'success' };
-const statusLabels: Record<string, string> = { ACKNOWLEDGED: '打印机已接收', FAILED: '失败', UNKNOWN: '状态未知', CANCELLED: '已取消', PRINTED: '已确认出纸', SUBMITTED: '已提交' };
+const statusColors: Record<string, string> = { ACKNOWLEDGED: 'processing', FAILED: 'error', UNKNOWN: 'warning', CANCELLED: 'default', PRINTED: 'success', RENDERED: 'default', SUBMITTED: 'blue' };
+const statusLabels: Record<string, string> = { ACKNOWLEDGED: '打印机已接收', FAILED: '失败', UNKNOWN: '状态未知', CANCELLED: '已取消', PRINTED: '已确认出纸', RENDERED: 'PDF 已生成', SUBMITTED: 'Spooler 已接收' };
 
 export function PrintCenterPage() {
   const session = useAppStore((state) => state.session)!;
@@ -23,6 +23,25 @@ export function PrintCenterPage() {
   const [form] = Form.useForm();
   const printers = useQuery({ queryKey: ['printers'], queryFn: printAgent.printers, retry: false });
   const jobs = useQuery({ queryKey: ['print-jobs'], queryFn: printAgent.jobs, refetchInterval: 5000, retry: false });
+  const buildTestPayload = (values: Record<string, string>) => ({
+    data_source: 'MANUAL_TEST',
+    server_task_id: `manual-${values.order_no}`,
+    erp_order_no: values.order_no,
+    order_version: 1,
+    package_id: `MANUAL-${values.order_no}`,
+    receiver_name: '本地测试收件人',
+    receiver_phone: '138****0000',
+    receiver_address: '测试样张地址，不用于寄件',
+    warehouse_name: '本地测试仓',
+    remark: values.remark || '',
+    items: [{
+      internal_sku: 'SO-TEST-SKU',
+      product_name: values.product_name,
+      specification: '测试规格',
+      quantity: Number(values.quantity || 1),
+      barcode: '6970000010011',
+    }],
+  });
   const create = useMutation({
     mutationFn: (values: Record<string, string>) => {
       const jobType = type.startsWith('MANIFEST') ? (values.paper_size || type) : type;
@@ -30,7 +49,7 @@ export function PrintCenterPage() {
         idempotency_key: `${jobType}-${values.order_no}`,
         job_type: jobType,
         printer_name: values.printer_name,
-        payload: { ...values, quantity: Number(values.quantity || 1), barcode: '6970000010011' },
+        payload: buildTestPayload(values),
         ...(jobType === 'PRODUCT_LABEL' && labelTemplate ? { label_template: labelTemplate } : {}),
       });
     },
@@ -39,7 +58,7 @@ export function PrintCenterPage() {
   });
   const retry = useMutation({
     mutationFn: async (job: PrintJob) => {
-      const retried = await printAgent.retry(job.id);
+      const retried = await printAgent.retry(job.id, job.status === 'UNKNOWN');
       const serverTaskId = job.payload?.server_task_id;
       if (typeof serverTaskId === 'string') await api.receipt(session.token, serverTaskId, retried);
       return retried;
@@ -51,7 +70,7 @@ export function PrintCenterPage() {
       const values = form.getFieldsValue();
       const jobType = type.startsWith('MANIFEST') ? (values.paper_size || type) : type;
       const blob = await printAgent.preview(jobType, {
-        ...values,
+        ...buildTestPayload(values),
         ...(jobType === 'PRODUCT_LABEL' && labelTemplate ? { label_template: labelTemplate } : {}),
       });
       window.open(URL.createObjectURL(blob), '_blank');
@@ -85,7 +104,12 @@ export function PrintCenterPage() {
           { title: '测试运单号', dataIndex: 'waybill_no', render: (value) => value ?? '—' },
           { title: '状态', dataIndex: 'status', width: 130, render: (value) => <Tag color={statusColors[value]}>{statusLabels[value] ?? value}</Tag> },
           { title: '说明', dataIndex: 'error_message', ellipsis: true },
-          { title: '操作', width: 100, render: (_, row) => <Space>{['FAILED', 'UNKNOWN'].includes(row.status) && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>重试</Button>}</Space> },
+          { title: '操作', width: 130, render: (_, row) => (
+            <Space>
+              {row.status === 'FAILED' && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>重试</Button>}
+              {row.status === 'UNKNOWN' && <Button type="link" icon={<RedoOutlined />} loading={retry.isPending} onClick={() => retry.mutate(row)}>人工核验后重试</Button>}
+            </Space>
+          ) },
         ]} />
       </Card>
     </div>
