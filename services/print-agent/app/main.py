@@ -1,0 +1,157 @@
+import secrets
+import uuid
+from typing import Literal
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from .config import get_settings
+from .printers import list_printers
+from .renderer import render_pdf
+from .store import FINAL_STATES, RETRYABLE_STATES, PrintStore
+
+settings = get_settings()
+settings.output_path.mkdir(parents=True, exist_ok=True)
+store = PrintStore(settings.database_path)
+recovered_jobs = store.recover_interrupted()
+app = FastAPI(title="智单 ERP Print Agent", version="0.1.0")
+
+JobType = Literal["WAYBILL", "MANIFEST_A4", "MANIFEST_A5", "MANIFEST_80", "PRODUCT_LABEL"]
+
+
+class JobRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    job_type: JobType
+    printer_name: str = "MockPrinter 智单测试打印机"
+    payload: dict = Field(default_factory=dict)
+    simulate_result: Literal["success", "failure", "unknown"] = "success"
+
+
+def authorize(authorization: str | None = Header(default=None)) -> None:
+    expected = f"Bearer {settings.print_agent_token}"
+    if not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(401, "Print Agent 访问令牌无效")
+
+
+@app.get("/api/v1/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "service": "smartorder-print-agent",
+        "mode": "MOCK_ENABLED",
+        "queue_paused": store.is_queue_paused(),
+        "recovered_jobs": recovered_jobs,
+    }
+
+
+@app.get("/api/v1/printers", dependencies=[Depends(authorize)])
+def printers() -> list[dict]:
+    return list_printers()
+
+
+@app.get("/api/v1/jobs", dependencies=[Depends(authorize)])
+def jobs(limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
+    return store.list(limit)
+
+
+def _execute(job: dict, simulate_result: str) -> dict:
+    if job["status"] in FINAL_STATES:
+        return job
+    store.transition(job["id"], "QUEUED")
+    output = settings.output_path / f"{job['id']}.pdf"
+    payload = job["payload"] | ({"waybill_no": job["waybill_no"]} if job["waybill_no"] else {})
+    render_pdf(job["job_type"], payload, output)
+    store.transition(job["id"], "SUBMITTED", output_file=str(output))
+    if simulate_result == "failure":
+        return store.transition(job["id"], "FAILED", "MockPrinter 模拟离线")
+    if simulate_result == "unknown":
+        return store.transition(job["id"], "UNKNOWN", "系统队列未返回纸张输出确认")
+    return store.transition(
+        job["id"],
+        "ACKNOWLEDGED",
+        "MockPrinter 已接收；不等同于真实纸张已输出",
+    )
+
+
+@app.post("/api/v1/jobs", dependencies=[Depends(authorize)])
+def create_job(payload: JobRequest) -> dict:
+    existing = store.get_by_key(payload.idempotency_key)
+    if existing:
+        return existing | {"deduplicated": True}
+    waybill_no = None
+    if payload.job_type == "WAYBILL":
+        waybill_no = f"TEST-{uuid.uuid4().hex[:16].upper()}"
+    job = store.create(
+        idempotency_key=payload.idempotency_key,
+        job_type=payload.job_type,
+        printer_name=payload.printer_name,
+        payload=payload.payload,
+        waybill_no=waybill_no,
+    )
+    if store.is_queue_paused():
+        return store.transition(job["id"], "QUEUED", "队列已暂停") | {
+            "deduplicated": False,
+            "queue_paused": True,
+        }
+    return _execute(job, payload.simulate_result) | {"deduplicated": False}
+
+
+@app.post("/api/v1/queue/pause", dependencies=[Depends(authorize)])
+def pause_queue() -> dict:
+    store.set_queue_paused(True)
+    return {"queue_paused": True}
+
+
+@app.post("/api/v1/queue/resume", dependencies=[Depends(authorize)])
+def resume_queue() -> dict:
+    store.set_queue_paused(False)
+    queued = [job for job in store.list(1000) if job["status"] == "QUEUED"]
+    for job in queued:
+        _execute(job, "success")
+    return {"queue_paused": False, "resumed": len(queued)}
+
+
+@app.post("/api/v1/jobs/{job_id}/retry", dependencies=[Depends(authorize)])
+def retry_job(job_id: str, simulate_result: str = "success") -> dict:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, "打印任务不存在")
+    if job["status"] not in RETRYABLE_STATES:
+        raise HTTPException(409, "仅失败或状态未知的任务允许重试")
+    return _execute(job, simulate_result)
+
+
+@app.post("/api/v1/jobs/{job_id}/cancel", dependencies=[Depends(authorize)])
+def cancel_job(job_id: str) -> dict:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, "打印任务不存在")
+    if job["status"] in FINAL_STATES:
+        raise HTTPException(409, "任务已经结束，不能取消")
+    return store.transition(job_id, "CANCELLED", "用户取消")
+
+
+@app.post("/api/v1/jobs/{job_id}/confirm-printed", dependencies=[Depends(authorize)])
+def confirm_printed(job_id: str) -> dict:
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, "打印任务不存在")
+    if job["status"] not in {"ACKNOWLEDGED", "UNKNOWN"}:
+        raise HTTPException(409, "仅已接收或状态未知的任务可人工确认出纸")
+    return store.transition(job_id, "PRINTED", "操作员人工确认纸张已输出")
+
+
+@app.post("/api/v1/preview/{job_type}", dependencies=[Depends(authorize)])
+def preview(job_type: JobType, payload: dict | None = None) -> FileResponse:
+    output = settings.output_path / f"preview-{job_type.lower()}-{uuid.uuid4().hex[:8]}.pdf"
+    render_pdf(job_type, payload or {}, output)
+    return FileResponse(output, media_type="application/pdf", filename=output.name)
+
+
+@app.get("/api/v1/jobs/{job_id}/pdf", dependencies=[Depends(authorize)])
+def job_pdf(job_id: str) -> FileResponse:
+    job = store.get(job_id)
+    if not job or not job["output_file"]:
+        raise HTTPException(404, "该任务没有可用的 PDF")
+    return FileResponse(job["output_file"], media_type="application/pdf")
