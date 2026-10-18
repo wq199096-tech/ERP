@@ -103,6 +103,20 @@ def downgrade() -> None:
             op.drop_constraint("fk_orders_warehouse_id", "orders", type_="foreignkey")
             op.drop_column("orders", "warehouse_id")
 
-    for table_name in reversed(sorted(STAGE4_TABLES)):
+    # Drop child tables before their referenced parents.  A lexical reverse order
+    # deletes warehouses first and fails on PostgreSQL dependent foreign keys.
+    for table_name in (
+        "shipment_items",
+        "shipments",
+        "stock_movements",
+        "inventory_reservations",
+        "inventory_balances",
+        "warehouse_locations",
+        "shop_sku_mappings",
+        "product_skus",
+        "products",
+        "product_categories",
+        "warehouses",
+    ):
         if sa.inspect(op.get_bind()).has_table(table_name):
             op.drop_table(table_name)

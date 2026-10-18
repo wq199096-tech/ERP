@@ -184,7 +184,22 @@ def test_postgresql_concurrent_reservation_scan_and_outbound() -> None:
     )
     assert stocktake.status_code == 200
 
-    records = client.get("/api/v1/orders?page_size=20", headers=headers).json()["records"]
+    with SessionLocal() as db:
+        prepared_orders = (
+            db.query(Order)
+            .filter(Order.audit_status == "PENDING", Order.status == "PENDING_SHIPMENT")
+            .order_by(Order.created_at.asc())
+            .limit(2)
+            .all()
+        )
+        assert len(prepared_orders) == 2
+        for order in prepared_orders:
+            order.items[0].internal_sku = "SO-CUP-450"
+            order.items[0].barcode = target_sku["barcode"]
+            order.items[0].quantity = 1
+        db.commit()
+
+    records = client.get("/api/v1/orders?page_size=100", headers=headers).json()["records"]
     candidates = [
         record
         for record in records
